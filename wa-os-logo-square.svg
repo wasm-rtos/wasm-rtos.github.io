@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
+  <title id="title">WA OS Logo</title>
+  <desc id="desc">Logo created with ChatGPT Plus for the WA OS organization.</desc>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="47%" r="72%">
+      <stop offset="0%" stop-color="#242424"/>
+      <stop offset="58%" stop-color="#1b1b1b"/>
+      <stop offset="100%" stop-color="#111111"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f4f4f4"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1254" height="1254" fill="url(#bg)"/>
+  <path fill="url(#mark)" fill-rule="evenodd" d="
+      M 189 133 L 182 154 L 182 613 L 517 614 L 558 573 L 697 573 L 738 614 L 1073 613 L 1073 157 L 1071 145 L 1065 132 L 1050 117 L 1032 110 L 232 109 L 222 110 L 208 115 L 197 123 Z
+      M 182 641 L 182 1085 L 189 1106 L 198 1117 L 208 1124 L 230 1130 L 994 1130 L 1037 1128 L 1050 1122 L 1065 1107 L 1073 1083 L 1072 641 L 723 642 L 684 603 L 572 602 L 533 641 Z
+      M 209 144 L 217 136 L 226 132 L 1029 132 L 1038 136 L 1046 144 L 1050 154 L 1050 592 L 749 593 L 706 550 L 549 550 L 505 593 L 206 593 L 205 153 Z
+      M 395 737 L 538 737 L 593 790 L 593 954 L 538 1007 L 396 1007 L 341 953 L 341 790 Z
+      M 726 737 L 873 737 L 915 772 L 883 801 L 740 801 L 736 805 L 736 836 L 740 840 L 862 840 L 915 890 L 916 954 L 864 1006 L 721 1007 L 716 1006 L 671 970 L 701 939 L 846 939 L 851 935 L 851 905 L 847 900 L 729 900 L 671 851 L 671 787 Z
+      M 293 251 L 391 465 L 429 464 L 501 305 L 508 316 L 575 464 L 614 465 L 710 251 L 665 252 L 595 410 L 589 401 L 519 251 L 482 252 L 410 409 L 406 404 L 338 252 Z
+      M 813 251 L 710 465 L 755 465 L 828 307 L 837 307 L 911 465 L 956 465 L 853 251 Z
+      M 412 799 L 407 804 L 407 940 L 411 944 L 522 944 L 527 939 L 526 803 L 521 799 Z
+  "/>
+</svg>
