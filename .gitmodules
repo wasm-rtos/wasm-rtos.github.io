@@ -1,0 +1,3 @@
+[submodule "os/wasm-rtos"]
+	path = os/wasm-rtos
+	url = https://github.com/wasm-rtos/wasm-rtos
