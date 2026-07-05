@@ -2,16 +2,34 @@
   'use strict';
 
   var STORAGE_KEY = 'wasmRtosWindowLayout';
+  var GRID_SIZE = 16;
+  var DESKTOP_QUERY = '(min-width: 921px)';
+  var DEFAULT_LAYOUT = {
+    launcher: { left: 0, top: 0, width: 514, height: 360, minWidth: 320, minHeight: 260 },
+    console: { left: 0, top: 380, width: 514, height: 380, minWidth: 360, minHeight: 260 },
+    preview: { left: 534, top: 0, width: 646, height: 760, minWidth: 320, minHeight: 240 },
+    tasks: { left: 0, top: 780, width: 1180, height: 360, minWidth: 560, minHeight: 320 }
+  };
   var windows = [];
   var zIndex = 30;
   var previewCanvas;
   var previewResizeObserver;
+  var workspace;
+  var desktopMedia;
 
   document.addEventListener('DOMContentLoaded', function () {
+    workspace = document.querySelector('.dashboard');
     windows = Array.prototype.slice.call(document.querySelectorAll('.window[data-window-id]'));
+    desktopMedia = window.matchMedia(DESKTOP_QUERY);
     initWindows();
-    restoreLayout();
+    applyWorkspaceMode();
     initPreviewCanvas();
+    window.addEventListener('resize', handleViewportResize);
+    if (desktopMedia.addEventListener) {
+      desktopMedia.addEventListener('change', applyWorkspaceMode);
+    } else if (desktopMedia.addListener) {
+      desktopMedia.addListener(applyWorkspaceMode);
+    }
   });
 
   function initWindows() {
@@ -20,16 +38,46 @@
       var handle = windowElement.querySelector('.resize-handle');
       if (header) {
         header.addEventListener('pointerdown', function (event) {
+          if (!isDesktopWorkspace()) return;
           if (event.target.closest('button, a, input, select, textarea')) return;
           startDrag(event, windowElement);
         });
       }
       if (handle) {
         handle.addEventListener('pointerdown', function (event) {
+          if (!isDesktopWorkspace()) return;
           startResize(event, windowElement);
         });
       }
     });
+  }
+
+  function applyWorkspaceMode() {
+    if (!workspace) return;
+    if (!isDesktopWorkspace()) {
+      windows.forEach(function (windowElement) {
+        windowElement.classList.remove('is-floating');
+        windowElement.style.left = '';
+        windowElement.style.top = '';
+        windowElement.style.width = '';
+        windowElement.style.height = '';
+        windowElement.style.zIndex = '';
+      });
+      workspace.style.height = '';
+      resizePreviewCanvas();
+      return;
+    }
+
+    var savedLayout = readLayout();
+    windows.forEach(function (windowElement) {
+      var id = windowElement.dataset.windowId;
+      var fallback = getDefaultState(id);
+      var state = savedLayout[id] || fallback;
+      applyWindowState(windowElement, state);
+      zIndex = Math.max(zIndex, state.zIndex || zIndex);
+    });
+    updateWorkspaceHeight();
+    resizePreviewCanvas();
   }
 
   function bringToFront(windowElement) {
@@ -38,31 +86,25 @@
     return zIndex;
   }
 
-  function makeFloating(windowElement) {
-    if (windowElement.classList.contains('is-floating')) return windowElement.getBoundingClientRect();
-    var rect = windowElement.getBoundingClientRect();
-    windowElement.classList.add('is-floating');
-    windowElement.style.left = rect.left + 'px';
-    windowElement.style.top = rect.top + 'px';
-    windowElement.style.width = rect.width + 'px';
-    windowElement.style.height = rect.height + 'px';
-    return rect;
-  }
-
   function startDrag(event, windowElement) {
     if (event.button !== undefined && event.button !== 0) return;
-    var rect = makeFloating(windowElement);
     bringToFront(windowElement);
+    var workspaceRect = workspace.getBoundingClientRect();
+    var rect = windowElement.getBoundingClientRect();
+    var startLeft = rect.left - workspaceRect.left;
+    var startTop = rect.top - workspaceRect.top;
     var offsetX = event.clientX - rect.left;
     var offsetY = event.clientY - rect.top;
     document.body.classList.add('dragging-active');
     if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId);
 
     function onMove(moveEvent) {
-      var maxLeft = Math.max(0, window.innerWidth - windowElement.offsetWidth);
-      var maxTop = Math.max(0, window.innerHeight - windowElement.offsetHeight);
-      windowElement.style.left = clamp(moveEvent.clientX - offsetX, 0, maxLeft) + 'px';
-      windowElement.style.top = clamp(moveEvent.clientY - offsetY, 0, maxTop) + 'px';
+      var maxLeft = Math.max(0, workspace.clientWidth - windowElement.offsetWidth);
+      var maxTop = Math.max(0, workspace.clientHeight - windowElement.offsetHeight);
+      var left = snap(moveEvent.clientX - workspaceRect.left - offsetX);
+      var top = snap(moveEvent.clientY - workspaceRect.top - offsetY);
+      windowElement.style.left = clamp(left, 0, maxLeft) + 'px';
+      windowElement.style.top = clamp(top, 0, maxTop) + 'px';
     }
 
     function onUp(upEvent) {
@@ -73,6 +115,8 @@
       if (event.currentTarget.releasePointerCapture) {
         try { event.currentTarget.releasePointerCapture(upEvent.pointerId); } catch (ignore) {}
       }
+      windowElement.style.left = clamp(snap(parseFloat(windowElement.style.left) || startLeft), 0, Math.max(0, workspace.clientWidth - windowElement.offsetWidth)) + 'px';
+      windowElement.style.top = clamp(snap(parseFloat(windowElement.style.top) || startTop), 0, Math.max(0, workspace.clientHeight - windowElement.offsetHeight)) + 'px';
       saveLayout();
     }
 
@@ -84,19 +128,22 @@
 
   function startResize(event, windowElement) {
     if (event.button !== undefined && event.button !== 0) return;
-    var rect = makeFloating(windowElement);
     bringToFront(windowElement);
+    var rect = windowElement.getBoundingClientRect();
+    var workspaceRect = workspace.getBoundingClientRect();
+    var state = getWindowState(windowElement);
     var startX = event.clientX;
     var startY = event.clientY;
-    var minWidth = parseFloat(getComputedStyle(windowElement).minWidth) || 280;
-    var minHeight = parseFloat(getComputedStyle(windowElement).minHeight) || 220;
+    var minSize = getMinimumSize(windowElement);
+    var left = rect.left - workspaceRect.left;
+    var top = rect.top - workspaceRect.top;
     if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId);
 
     function onMove(moveEvent) {
-      var maxWidth = window.innerWidth - rect.left;
-      var maxHeight = window.innerHeight - rect.top;
-      var width = clamp(rect.width + moveEvent.clientX - startX, minWidth, maxWidth);
-      var height = clamp(rect.height + moveEvent.clientY - startY, minHeight, maxHeight);
+      var maxWidth = Math.max(minSize.width, workspace.clientWidth - left);
+      var maxHeight = Math.max(minSize.height, workspace.clientHeight - top);
+      var width = clamp(snap(state.width + moveEvent.clientX - startX), minSize.width, maxWidth);
+      var height = clamp(snap(state.height + moveEvent.clientY - startY), minSize.height, maxHeight);
       windowElement.style.width = width + 'px';
       windowElement.style.height = height + 'px';
       if (windowElement.dataset.windowId === 'preview') resizePreviewCanvas();
@@ -121,43 +168,103 @@
   }
 
   function saveLayout() {
+    if (!isDesktopWorkspace()) return;
     var layout = {};
     windows.forEach(function (windowElement) {
-      if (!windowElement.classList.contains('is-floating')) return;
+      var state = getWindowState(windowElement);
       layout[windowElement.dataset.windowId] = {
-        left: parseFloat(windowElement.style.left) || 0,
-        top: parseFloat(windowElement.style.top) || 0,
-        width: parseFloat(windowElement.style.width) || windowElement.offsetWidth,
-        height: parseFloat(windowElement.style.height) || windowElement.offsetHeight,
+        left: snap(state.left),
+        top: snap(state.top),
+        width: snap(state.width),
+        height: snap(state.height),
         zIndex: parseInt(windowElement.style.zIndex, 10) || zIndex
       };
     });
     localStorage.setItem(STORAGE_KEY, JSON.stringify(layout));
   }
 
-  function restoreLayout() {
+  function readLayout() {
     var raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
+    if (!raw) return {};
     try {
-      var layout = JSON.parse(raw);
-      windows.forEach(function (windowElement) {
-        var state = layout[windowElement.dataset.windowId];
-        if (!state) return;
-        windowElement.classList.add('is-floating');
-        windowElement.style.left = clamp(state.left, 0, Math.max(0, window.innerWidth - state.width)) + 'px';
-        windowElement.style.top = clamp(state.top, 0, Math.max(0, window.innerHeight - state.height)) + 'px';
-        windowElement.style.width = clamp(state.width, 280, window.innerWidth) + 'px';
-        windowElement.style.height = clamp(state.height, 220, window.innerHeight) + 'px';
-        windowElement.style.zIndex = String(state.zIndex || zIndex);
-        zIndex = Math.max(zIndex, state.zIndex || zIndex);
-      });
+      return JSON.parse(raw) || {};
     } catch (error) {
       localStorage.removeItem(STORAGE_KEY);
+      return {};
     }
+  }
+
+  function applyWindowState(windowElement, state) {
+    var id = windowElement.dataset.windowId;
+    var minSize = getMinimumSize(windowElement);
+    var width = clamp(snap(state.width), minSize.width, workspace.clientWidth);
+    var height = clamp(snap(state.height), minSize.height, workspace.clientHeight);
+    var left = clamp(snap(state.left), 0, Math.max(0, workspace.clientWidth - width));
+    var top = clamp(snap(state.top), 0, Math.max(0, workspace.clientHeight - height));
+    windowElement.classList.add('is-floating');
+    windowElement.style.left = left + 'px';
+    windowElement.style.top = top + 'px';
+    windowElement.style.width = width + 'px';
+    windowElement.style.height = height + 'px';
+    windowElement.style.zIndex = String(state.zIndex || DEFAULT_LAYOUT[id].zIndex || zIndex);
+  }
+
+  function handleViewportResize() {
+    if (isDesktopWorkspace()) {
+      windows.forEach(function (windowElement) {
+        applyWindowState(windowElement, getWindowState(windowElement));
+      });
+      updateWorkspaceHeight();
+    }
+    resizePreviewCanvas();
+  }
+
+  function updateWorkspaceHeight() {
+    workspace.style.height = '1140px';
+  }
+
+  function getWindowState(windowElement) {
+    var rect = windowElement.getBoundingClientRect();
+    var workspaceRect = workspace.getBoundingClientRect();
+    return {
+      left: parseFloat(windowElement.style.left) || rect.left - workspaceRect.left,
+      top: parseFloat(windowElement.style.top) || rect.top - workspaceRect.top,
+      width: parseFloat(windowElement.style.width) || rect.width,
+      height: parseFloat(windowElement.style.height) || rect.height,
+      zIndex: parseInt(windowElement.style.zIndex, 10) || zIndex
+    };
+  }
+
+  function getDefaultState(id) {
+    var state = DEFAULT_LAYOUT[id];
+    var scale = Math.min(1, workspace.clientWidth / 1180);
+    return {
+      left: state.left * scale,
+      top: state.top,
+      width: state.width * scale,
+      height: state.height,
+      zIndex: state.zIndex || zIndex
+    };
+  }
+
+  function getMinimumSize(windowElement) {
+    var fallback = DEFAULT_LAYOUT[windowElement.dataset.windowId] || {};
+    return {
+      width: fallback.minWidth || 280,
+      height: fallback.minHeight || 220
+    };
+  }
+
+  function snap(value) {
+    return Math.round(value / GRID_SIZE) * GRID_SIZE;
   }
 
   function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
+  }
+
+  function isDesktopWorkspace() {
+    return desktopMedia ? desktopMedia.matches : window.innerWidth >= 921;
   }
 
   function initPreviewCanvas() {
@@ -174,15 +281,14 @@
 
   function resizePreviewCanvas() {
     if (!previewCanvas) return;
-    var stage = previewCanvas.parentElement;
-    var rect = stage.getBoundingClientRect();
+    var width = previewCanvas.clientWidth;
+    var height = previewCanvas.clientHeight;
+    if (!width || !height) return;
     var dpr = window.devicePixelRatio || 1;
-    var width = Math.max(320, rect.width);
-    var height = Math.max(180, rect.height);
-    previewCanvas.width = Math.round(width * dpr);
-    previewCanvas.height = Math.round(height * dpr);
-    previewCanvas.style.width = width + 'px';
-    previewCanvas.style.height = height + 'px';
+    var bufferWidth = Math.max(1, Math.round(width * dpr));
+    var bufferHeight = Math.max(1, Math.round(height * dpr));
+    if (previewCanvas.width !== bufferWidth) previewCanvas.width = bufferWidth;
+    if (previewCanvas.height !== bufferHeight) previewCanvas.height = bufferHeight;
     drawPreviewCanvas();
   }
 
