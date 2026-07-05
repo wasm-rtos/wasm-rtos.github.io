@@ -5,13 +5,12 @@
   var GRID_SIZE = 16;
   var DESKTOP_QUERY = '(min-width: 921px)';
   var DEFAULT_LAYOUT = {
-    launcher: { left: 0, top: 0, width: 514, height: 360, minWidth: 320, minHeight: 260 },
-    console: { left: 0, top: 380, width: 514, height: 380, minWidth: 360, minHeight: 260 },
-    preview: { left: 534, top: 0, width: 646, height: 760, minWidth: 320, minHeight: 240 },
-    tasks: { left: 0, top: 780, width: 1180, height: 360, minWidth: 560, minHeight: 320 }
+    launcher: { width: 514, height: 360, minWidth: 320, minHeight: 260 },
+    console: { width: 514, height: 380, minWidth: 360, minHeight: 260 },
+    preview: { width: 646, height: 760, minWidth: 320, minHeight: 240 },
+    tasks: { width: 1180, height: 360, minWidth: 560, minHeight: 320 }
   };
   var windows = [];
-  var zIndex = 30;
   var previewCanvas;
   var previewResizeObserver;
   var workspace;
@@ -22,27 +21,19 @@
     windows = Array.prototype.slice.call(document.querySelectorAll('.window[data-window-id]'));
     desktopMedia = window.matchMedia(DESKTOP_QUERY);
     initWindows();
-    applyWorkspaceMode();
+    applySavedSizes();
     initPreviewCanvas();
     window.addEventListener('resize', handleViewportResize);
     if (desktopMedia.addEventListener) {
-      desktopMedia.addEventListener('change', applyWorkspaceMode);
+      desktopMedia.addEventListener('change', applySavedSizes);
     } else if (desktopMedia.addListener) {
-      desktopMedia.addListener(applyWorkspaceMode);
+      desktopMedia.addListener(applySavedSizes);
     }
   });
 
   function initWindows() {
     windows.forEach(function (windowElement) {
-      var header = windowElement.querySelector('.window-header');
       var handle = windowElement.querySelector('.resize-handle');
-      if (header) {
-        header.addEventListener('pointerdown', function (event) {
-          if (!isDesktopWorkspace()) return;
-          if (event.target.closest('button, a, input, select, textarea')) return;
-          startDrag(event, windowElement);
-        });
-      }
       if (handle) {
         handle.addEventListener('pointerdown', function (event) {
           if (!isDesktopWorkspace()) return;
@@ -52,83 +43,29 @@
     });
   }
 
-  function applyWorkspaceMode() {
+  function applySavedSizes() {
     if (!workspace) return;
     if (!isDesktopWorkspace()) {
       windows.forEach(function (windowElement) {
-        windowElement.classList.remove('is-floating');
-        windowElement.style.left = '';
-        windowElement.style.top = '';
         windowElement.style.width = '';
         windowElement.style.height = '';
-        windowElement.style.zIndex = '';
       });
-      workspace.style.height = '';
       resizePreviewCanvas();
       return;
     }
 
-    var savedLayout = readLayout();
+    var savedSizes = readSizes();
     windows.forEach(function (windowElement) {
       var id = windowElement.dataset.windowId;
       var fallback = getDefaultState(id);
-      var state = savedLayout[id] || fallback;
-      applyWindowState(windowElement, state);
-      zIndex = Math.max(zIndex, state.zIndex || zIndex);
+      var state = savedSizes[id] || fallback;
+      applyWindowSize(windowElement, state);
     });
-    updateWorkspaceHeight();
     resizePreviewCanvas();
-  }
-
-  function bringToFront(windowElement) {
-    zIndex += 1;
-    windowElement.style.zIndex = String(zIndex);
-    return zIndex;
-  }
-
-  function startDrag(event, windowElement) {
-    if (event.button !== undefined && event.button !== 0) return;
-    bringToFront(windowElement);
-    var workspaceRect = workspace.getBoundingClientRect();
-    var rect = windowElement.getBoundingClientRect();
-    var startLeft = rect.left - workspaceRect.left;
-    var startTop = rect.top - workspaceRect.top;
-    var offsetX = event.clientX - rect.left;
-    var offsetY = event.clientY - rect.top;
-    document.body.classList.add('dragging-active');
-    if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId);
-
-    function onMove(moveEvent) {
-      var maxLeft = Math.max(0, workspace.clientWidth - windowElement.offsetWidth);
-      var maxTop = Math.max(0, workspace.clientHeight - windowElement.offsetHeight);
-      var left = snap(moveEvent.clientX - workspaceRect.left - offsetX);
-      var top = snap(moveEvent.clientY - workspaceRect.top - offsetY);
-      windowElement.style.left = clamp(left, 0, maxLeft) + 'px';
-      windowElement.style.top = clamp(top, 0, maxTop) + 'px';
-    }
-
-    function onUp(upEvent) {
-      document.removeEventListener('pointermove', onMove);
-      document.removeEventListener('pointerup', onUp);
-      document.removeEventListener('pointercancel', onUp);
-      document.body.classList.remove('dragging-active');
-      if (event.currentTarget.releasePointerCapture) {
-        try { event.currentTarget.releasePointerCapture(upEvent.pointerId); } catch (ignore) {}
-      }
-      windowElement.style.left = clamp(snap(parseFloat(windowElement.style.left) || startLeft), 0, Math.max(0, workspace.clientWidth - windowElement.offsetWidth)) + 'px';
-      windowElement.style.top = clamp(snap(parseFloat(windowElement.style.top) || startTop), 0, Math.max(0, workspace.clientHeight - windowElement.offsetHeight)) + 'px';
-      saveLayout();
-    }
-
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp);
-    document.addEventListener('pointercancel', onUp);
-    event.preventDefault();
   }
 
   function startResize(event, windowElement) {
     if (event.button !== undefined && event.button !== 0) return;
-    bringToFront(windowElement);
     var rect = windowElement.getBoundingClientRect();
     var workspaceRect = workspace.getBoundingClientRect();
     var state = getWindowState(windowElement);
@@ -156,7 +93,7 @@
       if (event.currentTarget.releasePointerCapture) {
         try { event.currentTarget.releasePointerCapture(upEvent.pointerId); } catch (ignore) {}
       }
-      saveLayout();
+      saveSizes();
       resizePreviewCanvas();
     }
 
@@ -167,23 +104,20 @@
     event.stopPropagation();
   }
 
-  function saveLayout() {
+  function saveSizes() {
     if (!isDesktopWorkspace()) return;
-    var layout = {};
+    var sizes = {};
     windows.forEach(function (windowElement) {
       var state = getWindowState(windowElement);
-      layout[windowElement.dataset.windowId] = {
-        left: snap(state.left),
-        top: snap(state.top),
+      sizes[windowElement.dataset.windowId] = {
         width: snap(state.width),
-        height: snap(state.height),
-        zIndex: parseInt(windowElement.style.zIndex, 10) || zIndex
+        height: snap(state.height)
       };
     });
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(layout));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sizes));
   }
 
-  function readLayout() {
+  function readSizes() {
     var raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     try {
@@ -194,44 +128,34 @@
     }
   }
 
-  function applyWindowState(windowElement, state) {
-    var id = windowElement.dataset.windowId;
+  function applyWindowSize(windowElement, state) {
     var minSize = getMinimumSize(windowElement);
-    var width = clamp(snap(state.width), minSize.width, workspace.clientWidth);
-    var height = clamp(snap(state.height), minSize.height, workspace.clientHeight);
-    var left = clamp(snap(state.left), 0, Math.max(0, workspace.clientWidth - width));
-    var top = clamp(snap(state.top), 0, Math.max(0, workspace.clientHeight - height));
-    windowElement.classList.add('is-floating');
-    windowElement.style.left = left + 'px';
-    windowElement.style.top = top + 'px';
+    var rect = windowElement.getBoundingClientRect();
+    var workspaceRect = workspace.getBoundingClientRect();
+    var left = rect.left - workspaceRect.left;
+    var top = rect.top - workspaceRect.top;
+    var maxWidth = Math.max(minSize.width, workspace.clientWidth - left);
+    var maxHeight = Math.max(minSize.height, workspace.clientHeight - top);
+    var width = clamp(snap(state.width), minSize.width, maxWidth);
+    var height = clamp(snap(state.height), minSize.height, maxHeight);
     windowElement.style.width = width + 'px';
     windowElement.style.height = height + 'px';
-    windowElement.style.zIndex = String(state.zIndex || DEFAULT_LAYOUT[id].zIndex || zIndex);
   }
 
   function handleViewportResize() {
     if (isDesktopWorkspace()) {
       windows.forEach(function (windowElement) {
-        applyWindowState(windowElement, getWindowState(windowElement));
+        applyWindowSize(windowElement, getWindowState(windowElement));
       });
-      updateWorkspaceHeight();
     }
     resizePreviewCanvas();
   }
 
-  function updateWorkspaceHeight() {
-    workspace.style.height = '1140px';
-  }
-
   function getWindowState(windowElement) {
     var rect = windowElement.getBoundingClientRect();
-    var workspaceRect = workspace.getBoundingClientRect();
     return {
-      left: parseFloat(windowElement.style.left) || rect.left - workspaceRect.left,
-      top: parseFloat(windowElement.style.top) || rect.top - workspaceRect.top,
       width: parseFloat(windowElement.style.width) || rect.width,
-      height: parseFloat(windowElement.style.height) || rect.height,
-      zIndex: parseInt(windowElement.style.zIndex, 10) || zIndex
+      height: parseFloat(windowElement.style.height) || rect.height
     };
   }
 
@@ -239,11 +163,8 @@
     var state = DEFAULT_LAYOUT[id];
     var scale = Math.min(1, workspace.clientWidth / 1180);
     return {
-      left: state.left * scale,
-      top: state.top,
       width: state.width * scale,
-      height: state.height,
-      zIndex: state.zIndex || zIndex
+      height: state.height
     };
   }
 
