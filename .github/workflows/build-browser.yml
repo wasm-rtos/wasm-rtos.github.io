@@ -58,6 +58,14 @@ jobs:
           fi
           tail -n 100 build-browser.log
 
+      - name: Upload browser build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-build-log
+          path: build-browser.log
+          if-no-files-found: warn
+
       - name: Verify browser runtime outputs
         run: |
           test -s os/wasm-rtos.js
