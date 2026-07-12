@@ -10,4 +10,91 @@
 </head>
 <body>
   <header class="top-header">
-    <a class="brand"
+    <a class="brand" href="#" aria-label="WA OS home">
+      <img src="wa-os-logo-horizontal.svg" alt="WA OS">
+    </a>
+  </header>
+
+  <main class="dashboard" aria-label="wasm-rtos task dashboard">
+    <div class="content-row">
+      <section class="left-pane" aria-label="Task controls">
+        <div class="hero-upload-row">
+          <section class="hero" aria-labelledby="hero-title">
+            <p class="eyebrow">wasm-rtos</p>
+            <h1 id="hero-title">Run WebAssembly apps in the browser.</h1>
+            <p>Drag &amp; drop your .wasm app to launch it in a secure, high-performance runtime. Control, monitor, and scale tasks in real time.</p>
+          </section>
+
+          <section class="card upload-card" aria-labelledby="upload-title">
+            <input id="wasmFile" class="file-input" type="file" accept=".wasm" aria-label="Choose WASM file">
+            <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-describedby="upload-help">
+              <div class="cloud-icon" aria-hidden="true">
+                <svg viewBox="0 0 64 48" focusable="false">
+                  <path d="M20 38H47C55 38 60 33 60 26C60 19 55 14 48 14C45 6 38 2 30 4C23 5 18 10 16 17C9 18 4 23 4 30C4 35 9 38 20 38Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M32 32V17M24 25L32 17L40 25" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <h2 id="upload-title">Drag &amp; Drop WASM App</h2>
+              <p id="upload-help">.wasm files only</p>
+              <button id="launchButton" class="primary-button" type="button">Launch Task</button>
+            </div>
+          </section>
+        </div>
+
+        <section class="card tasks-card" aria-labelledby="tasks-title">
+          <div class="card-header">
+            <div class="title-group">
+              <h2 id="tasks-title">Tasks</h2>
+              <span id="activeBadge" class="pill">0 Tasks</span>
+            </div>
+            <button id="newTaskButton" class="secondary-button" type="button">+ New Task</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>APP NAME</th>
+                  <th>TASK ID</th>
+                  <th>STATUS</th>
+                  <th>PRIORITY</th>
+                  <th>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody id="taskBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <aside class="right-pane" aria-label="Runtime output">
+        <section class="card console-card" aria-labelledby="console-title">
+          <div class="card-header">
+            <h2 id="console-title">Console</h2>
+            <button class="link-button" type="button">Open Terminal ↗</button>
+          </div>
+          <pre id="consoleLog" class="terminal" aria-live="polite"></pre>
+        </section>
+
+        <section class="card preview-card" aria-labelledby="preview-title">
+          <div class="card-header">
+            <h2 id="preview-title">Preview Output</h2>
+            <span class="app-label">wasm-rtos <span aria-hidden="true">●</span></span>
+          </div>
+          <div class="canvas-shell">
+            <canvas id="previewCanvas" aria-label="Animated WebAssembly preview output"></canvas>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <section class="card stats-bar" aria-label="Runtime statistics">
+      <div class="stat cpu-stat"><div class="cpu-meter"><span>CPU</span><strong id="cpuValue">0%</strong><div class="progress"><i id="cpuProgress" style="width:0%"></i></div></div></div>
+      <div class="stat"><span>MEMORY</span><strong id="memoryValue">0 MB</strong><div class="progress"><i id="memoryProgress" style="width:0%"></i></div></div>
+      <div class="stat"><span>ACTIVE TASKS</span><strong><b id="activeRatio">0 / 0</b></strong><div class="progress"><i id="activeProgress" style="width:0%"></i></div></div>
+      <div class="stat"><span>RUNTIME</span><strong id="runtimeClock">00:00:00</strong></div>
+      <div class="stat"><span>QUEUE</span><strong id="queueCount">0</strong><div class="progress"><i id="queueProgress" style="width:0%"></i></div></div>
+      <div class="runtime-ok"><span class="status-dot"></span><div><strong id="runtimeStatus">Runtime: Loading</strong><small id="runtimeStatusDetail">Initializing wasm-rtos</small></div></div>
+    </section>
+  </main>
+</body>
+</html>
