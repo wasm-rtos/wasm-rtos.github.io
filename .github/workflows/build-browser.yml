@@ -42,16 +42,21 @@ jobs:
 
       - name: Install latest Emscripten SDK
         run: |
-          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
-          "$RUNNER_TEMP/emsdk/emsdk" install latest
-          "$RUNNER_TEMP/emsdk/emsdk" activate latest
-          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk" >/dev/null
+          "$RUNNER_TEMP/emsdk/emsdk" install latest >"$RUNNER_TEMP/emsdk-install.log"
+          "$RUNNER_TEMP/emsdk/emsdk" activate latest >>"$RUNNER_TEMP/emsdk-install.log"
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh" >/dev/null
           emcc --version
 
       - name: Build JavaScript and WebAssembly runtime
         run: |
-          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
-          bash ./build-browser.sh
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh" >/dev/null
+          if ! bash ./build-browser.sh >build-browser.log 2>&1; then
+            echo "Browser runtime compilation failed:"
+            tail -n 100 build-browser.log
+            exit 1
+          fi
+          tail -n 100 build-browser.log
 
       - name: Verify browser runtime outputs
         run: |
