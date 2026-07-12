@@ -50,6 +50,7 @@ rm -f "$OUTPUT_JS" "$OUTPUT_WASM"
     -O2 \
     -Wall \
     -Wextra \
+    -D_GNU_SOURCE \
     -Dd_m3HasWASI \
     -I. \
     -I"$WASM_RTOS_DIR" \
