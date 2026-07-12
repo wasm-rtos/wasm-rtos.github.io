@@ -55,15 +55,33 @@ function appendLog(message) {
   consoleLog.scrollTop = consoleLog.scrollHeight;
 }
 
+function readCString(pointer) {
+  if (!runtime || !pointer) return '';
+  const bytes = [];
+  for (let index = pointer; runtime.HEAPU8[index] !== 0; index += 1) {
+    bytes.push(runtime.HEAPU8[index]);
+  }
+  return new TextDecoder().decode(Uint8Array.from(bytes));
+}
+
 function runtimeError() {
   if (!runtime) return 'wasm-rtos runtime is not initialized';
   const pointer = runtime.ccall('browser_runtime_get_last_error', 'number', [], []);
-  return pointer ? runtime.UTF8ToString(pointer) : 'unknown runtime error';
+  return pointer ? readCString(pointer) : 'unknown runtime error';
 }
 
 function callRuntime(name, returnType, argumentTypes = [], argumentsList = []) {
   if (!runtime) throw new Error('wasm-rtos runtime is not initialized');
   return runtime.ccall(name, returnType, argumentTypes, argumentsList);
+}
+
+async function detectEntryPoint(wasmBytes) {
+  const module = await WebAssembly.compile(wasmBytes);
+  const exports = WebAssembly.Module.exports(module).map((item) => item.name);
+  for (const candidate of ['app_main', '_start', 'main']) {
+    if (exports.includes(candidate)) return candidate;
+  }
+  throw new Error('No supported entry point found. Expected app_main, _start, or main.');
 }
 
 function stateToStatus(taskId) {
@@ -83,18 +101,27 @@ function stateToStatus(taskId) {
 }
 
 function createOsTask(task) {
-  const taskId = callRuntime(
-    'browser_task_create',
-    'number',
-    ['array', 'number', 'string', 'string', 'number', 'number'],
-    [task.wasmBytes, task.wasmBytes.length, 'app_main', task.app, 64 * 1024, task.priority]
-  );
+  const wasmPointer = runtime._malloc(task.wasmBytes.length);
+  if (!wasmPointer) throw new Error('Unable to allocate memory for the guest module');
+
+  let taskId = 0;
+  try {
+    runtime.HEAPU8.set(task.wasmBytes, wasmPointer);
+    taskId = callRuntime(
+      'browser_task_create',
+      'number',
+      ['number', 'number', 'string', 'string', 'number', 'number'],
+      [wasmPointer, task.wasmBytes.length, task.entryPoint, task.app, 64 * 1024, task.priority]
+    );
+  } finally {
+    runtime._free(wasmPointer);
+  }
 
   if (!taskId) throw new Error(runtimeError());
   task.osTaskId = taskId;
   task.id = `task_${taskId}`;
   task.status = 'Ready';
-  appendLog(`Started ${task.app} as ${task.id}`);
+  appendLog(`Started ${task.app} as ${task.id} using ${task.entryPoint}`);
 }
 
 function actionButtons(task) {
@@ -209,6 +236,7 @@ async function addFile(file) {
     return;
   }
 
+  const wasmBytes = new Uint8Array(await file.arrayBuffer());
   const task = {
     localId: crypto.randomUUID(),
     id: 'pending',
@@ -216,7 +244,8 @@ async function addFile(file) {
     status: 'Ready',
     priority: 5,
     osTaskId: 0,
-    wasmBytes: new Uint8Array(await file.arrayBuffer())
+    wasmBytes,
+    entryPoint: await detectEntryPoint(wasmBytes)
   };
 
   try {
@@ -232,7 +261,7 @@ async function addFile(file) {
 }
 
 function handleFiles(files) {
-  Array.from(files).forEach((file) => addFile(file));
+  Array.from(files).forEach((file) => addFile(file).catch((error) => appendLog(`${file.name}: ${error.message}`)));
 }
 
 ['click', 'keydown'].forEach((type) => {
