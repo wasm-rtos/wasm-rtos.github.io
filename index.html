@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>wasm-rtos</title>
   <link rel="stylesheet" href="style.css">
+  <script src="os/wasm-rtos.js" defer></script>
   <script src="main.js" defer></script>
 </head>
 <body>
@@ -44,7 +45,7 @@
           <div class="card-header">
             <div class="title-group">
               <h2 id="tasks-title">Tasks</h2>
-              <span id="activeBadge" class="pill">6 Active</span>
+              <span id="activeBadge" class="pill">0 Tasks</span>
             </div>
             <button id="newTaskButton" class="secondary-button" type="button">+ New Task</button>
           </div>
@@ -77,7 +78,7 @@
         <section class="card preview-card" aria-labelledby="preview-title">
           <div class="card-header">
             <h2 id="preview-title">Preview Output</h2>
-            <span class="app-label">app: orbit.wasm <span aria-hidden="true">●</span></span>
+            <span class="app-label">wasm-rtos <span aria-hidden="true">●</span></span>
           </div>
           <div class="canvas-shell">
             <canvas id="previewCanvas" aria-label="Animated WebAssembly preview output"></canvas>
@@ -87,12 +88,12 @@
     </div>
 
     <section class="card stats-bar" aria-label="Runtime statistics">
-      <div class="stat cpu-stat"><div class="cpu-meter"><span>CPU</span><strong>18%</strong><div class="progress"><i style="width:18%"></i></div></div></div>
-      <div class="stat"><span>MEMORY</span><strong>412 MB <em>/ 2 GB</em></strong><div class="progress"><i style="width:22%"></i></div></div>
-      <div class="stat"><span>ACTIVE TASKS</span><strong><b id="activeRatio">3 / 6</b></strong><div class="progress"><i id="activeProgress" style="width:50%"></i></div></div>
-      <div class="stat"><span>RUNTIME</span><strong id="runtimeClock">01:24:37</strong></div>
-      <div class="stat"><span>QUEUE</span><strong id="queueCount">2</strong><div class="progress"><i id="queueProgress" style="width:34%"></i></div></div>
-      <div class="runtime-ok"><span class="status-dot"></span><div><strong>Runtime: OK</strong><small>All systems nominal</small></div></div>
+      <div class="stat cpu-stat"><div class="cpu-meter"><span>CPU</span><strong id="cpuValue">0%</strong><div class="progress"><i id="cpuProgress" style="width:0%"></i></div></div></div>
+      <div class="stat"><span>MEMORY</span><strong id="memoryValue">0 MB</strong><div class="progress"><i id="memoryProgress" style="width:0%"></i></div></div>
+      <div class="stat"><span>ACTIVE TASKS</span><strong><b id="activeRatio">0 / 0</b></strong><div class="progress"><i id="activeProgress" style="width:0%"></i></div></div>
+      <div class="stat"><span>RUNTIME</span><strong id="runtimeClock">00:00:00</strong></div>
+      <div class="stat"><span>QUEUE</span><strong id="queueCount">0</strong><div class="progress"><i id="queueProgress" style="width:0%"></i></div></div>
+      <div class="runtime-ok"><span class="status-dot"></span><div><strong id="runtimeStatus">Runtime: Loading</strong><small id="runtimeStatusDetail">Initializing wasm-rtos</small></div></div>
     </section>
   </main>
 </body>
