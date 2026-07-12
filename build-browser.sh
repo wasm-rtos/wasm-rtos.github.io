@@ -61,7 +61,6 @@ rm -f "$OUTPUT_JS" "$OUTPUT_WASM"
     -sWASM=1 \
     -sALLOW_MEMORY_GROWTH=1 \
     -sNO_EXIT_RUNTIME=1 \
-    -sINVOKE_RUN=0 \
     -sMODULARIZE=1 \
     -sEXPORT_NAME=createWasmRtosModule \
     -sENVIRONMENT=web \
