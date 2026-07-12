@@ -18,4 +18,92 @@ on:
       - "os/wasm-rtos"
       - ".gitmodules"
       - "build-browser.sh"
-      - ".
+      - ".github/workflows/build-browser.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Update wasm-rtos and nested wasm3 submodules
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --remote --recursive
+          git submodule status --recursive
+
+          test -f os/wasm-rtos/os.c
+          test -f os/wasm-rtos/wasm3/source/wasm3.h
+
+          echo "wasm-rtos commit: $(git -C os/wasm-rtos rev-parse HEAD)"
+          echo "wasm3 commit: $(git -C os/wasm-rtos/wasm3 rev-parse HEAD)"
+
+          if ! git -C os/wasm-rtos diff --quiet -- wasm3; then
+            echo "::warning::The nested wasm3 checkout is newer than the gitlink recorded by wasm-rtos. It is used by this build, but must be committed in the wasm-rtos repository to become permanent."
+          fi
+
+      - name: Install latest Emscripten SDK
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk" >/dev/null
+          "$RUNNER_TEMP/emsdk/emsdk" install latest >"$RUNNER_TEMP/emsdk-install.log"
+          "$RUNNER_TEMP/emsdk/emsdk" activate latest >>"$RUNNER_TEMP/emsdk-install.log"
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh" >/dev/null
+          emcc --version
+
+      - name: Build JavaScript and WebAssembly runtime
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh" >/dev/null
+          if ! bash ./build-browser.sh >build-browser.log 2>&1; then
+            echo "Browser runtime compilation failed:"
+            tail -n 100 build-browser.log
+            exit 1
+          fi
+          tail -n 100 build-browser.log
+
+      - name: Upload browser build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-build-log
+          path: build-browser.log
+          if-no-files-found: warn
+
+      - name: Verify browser runtime outputs
+        run: |
+          test -s os/wasm-rtos.js
+          test -s os/wasm-rtos.wasm
+          test "$(od -An -tx1 -N4 os/wasm-rtos.wasm | tr -d ' \n')" = "0061736d"
+          grep -q "createWasmRtosModule" os/wasm-rtos.js
+          ls -lh os/wasm-rtos.js os/wasm-rtos.wasm
+
+      - name: Persist updated wasm-rtos submodule
+        if: github.event_name == 'push'
+        run: |
+          branch="${{ github.ref_name }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add os/wasm-rtos
+
+          if git diff --cached --quiet; then
+            echo "No wasm-rtos submodule pointer changed"
+            exit 0
+          fi
+
+          git commit -m "Update wasm-rtos submodule"
+          git push origin "HEAD:$branch"
+
+      - name: Upload browser runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-rtos-browser
+          path: |
+            os/wasm-rtos.js
+            os/wasm-rtos.wasm
+          if-no-files-found: error
