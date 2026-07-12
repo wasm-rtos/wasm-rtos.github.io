@@ -7,6 +7,8 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - "index.html"
+      - "main.js"
       - "os/main.c"
       - "os/wasm-rtos"
       - ".gitmodules"
@@ -14,6 +16,8 @@ on:
       - ".github/workflows/build-browser.yml"
   pull_request:
     paths:
+      - "index.html"
+      - "main.js"
       - "os/main.c"
       - "os/wasm-rtos"
       - ".gitmodules"
@@ -47,6 +51,11 @@ jobs:
           if ! git -C os/wasm-rtos diff --quiet -- wasm3; then
             echo "::warning::The nested wasm3 checkout is newer than the gitlink recorded by wasm-rtos. It is used by this build, but must be committed in the wasm-rtos repository to become permanent."
           fi
+
+      - name: Validate site JavaScript
+        run: |
+          node --check main.js
+          grep -q 'os/wasm-rtos.js' index.html
 
       - name: Install latest Emscripten SDK
         run: |
@@ -82,21 +91,21 @@ jobs:
           grep -q "createWasmRtosModule" os/wasm-rtos.js
           ls -lh os/wasm-rtos.js os/wasm-rtos.wasm
 
-      - name: Persist updated wasm-rtos submodule
+      - name: Publish runtime files to the site branch
         if: github.event_name == 'push'
         run: |
           branch="${{ github.ref_name }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add os/wasm-rtos
+          git add os/wasm-rtos os/wasm-rtos.js os/wasm-rtos.wasm
 
           if git diff --cached --quiet; then
-            echo "No wasm-rtos submodule pointer changed"
+            echo "No browser runtime or submodule pointer changed"
             exit 0
           fi
 
-          git commit -m "Update wasm-rtos submodule"
+          git commit -m "Update browser runtime"
           git push origin "HEAD:$branch"
 
       - name: Upload browser runtime
