@@ -15,6 +15,8 @@ const OS_TASK_EXIT_EXPLICIT = 2;
 const OS_TASK_EXIT_DELETED = 3;
 const OS_TASK_EXIT_WASM_ERROR = 4;
 
+const UINT32_MAX = 0xFFFFFFFF;
+
 const statusIcons = {
   Running: '▶',
   Ready: '◷',
@@ -124,34 +126,96 @@ function createOsTask(task) {
   appendLog(`Started ${task.app} as ${task.id} using ${task.entryPoint}`);
 }
 
-function actionButtons(task) {
+function createTextCell(value) {
+  const cell = document.createElement('td');
+  cell.textContent = value;
+  return cell;
+}
+
+function createStatusCell(task) {
+  const cell = document.createElement('td');
+  const status = document.createElement('span');
+  const icon = document.createElement('span');
+
+  status.className = 'status';
+  icon.className = 'status-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = statusIcons[task.status] || '?';
+
+  status.append(icon, document.createTextNode(task.status));
+  cell.appendChild(status);
+  return cell;
+}
+
+function canSetTaskPriority(task) {
+  return Boolean(task.osTaskId) && !['Completed', 'Failed', 'Stopped'].includes(task.status);
+}
+
+function createPriorityCell(task) {
+  const cell = document.createElement('td');
+  const input = document.createElement('input');
+
+  input.className = 'priority-input';
+  input.type = 'number';
+  input.min = '0';
+  input.max = String(UINT32_MAX);
+  input.step = '1';
+  input.value = String(task.priority);
+  input.dataset.priorityTaskId = task.localId;
+  input.disabled = !canSetTaskPriority(task);
+  input.setAttribute('aria-label', `Priority for ${task.app}`);
+
+  cell.appendChild(input);
+  return cell;
+}
+
+function createActionButton(task, action, label, symbol) {
+  const button = document.createElement('button');
+  button.className = 'icon-button';
+  button.type = 'button';
+  button.dataset.action = action;
+  button.dataset.id = task.localId;
+  button.setAttribute('aria-label', `${label} ${task.app}`);
+  button.textContent = symbol;
+  return button;
+}
+
+function createActionsCell(task) {
+  const cell = document.createElement('td');
+  const actions = document.createElement('div');
   const canPause = task.osTaskId && ['Running', 'Ready', 'Waiting'].includes(task.status);
   const canResume = task.osTaskId && task.status === 'Paused';
   const canStop = Boolean(task.osTaskId) && !['Completed', 'Failed', 'Stopped'].includes(task.status);
-  const pauseResume = canPause
-    ? `<button class="icon-button" data-action="pause" data-id="${task.localId}" aria-label="Pause ${task.app}">Ⅱ</button>`
-    : canResume
-      ? `<button class="icon-button" data-action="resume" data-id="${task.localId}" aria-label="Resume ${task.app}">▶</button>`
-      : '';
-  const stop = canStop
-    ? `<button class="icon-button" data-action="stop" data-id="${task.localId}" aria-label="Stop ${task.app}">■</button>`
-    : '';
-  const restart = `<button class="icon-button" data-action="restart" data-id="${task.localId}" aria-label="Restart ${task.app}">↻</button>`;
-  const remove = `<button class="icon-button" data-action="remove" data-id="${task.localId}" aria-label="Remove ${task.app}">♲</button>`;
-  return `${pauseResume}${stop}${restart}${remove}`;
+
+  actions.className = 'actions';
+
+  if (canPause) {
+    actions.appendChild(createActionButton(task, 'pause', 'Pause', 'Ⅱ'));
+  } else if (canResume) {
+    actions.appendChild(createActionButton(task, 'resume', 'Resume', '▶'));
+  }
+
+  if (canStop) {
+    actions.appendChild(createActionButton(task, 'stop', 'Stop', '■'));
+  }
+
+  actions.appendChild(createActionButton(task, 'restart', 'Restart', '↻'));
+  actions.appendChild(createActionButton(task, 'remove', 'Remove', '♲'));
+  cell.appendChild(actions);
+  return cell;
 }
 
 function renderTasks() {
-  taskBody.innerHTML = '';
+  taskBody.replaceChildren();
   tasks.forEach((task) => {
     const row = document.createElement('tr');
-    row.innerHTML = `
-      <td>${task.app}</td>
-      <td>${task.id}</td>
-      <td><span class="status"><span class="status-icon" aria-hidden="true">${statusIcons[task.status] || '?'}</span>${task.status}</span></td>
-      <td><span class="priority">${task.priority}</span></td>
-      <td><div class="actions">${actionButtons(task)}</div></td>
-    `;
+    row.append(
+      createTextCell(task.app),
+      createTextCell(task.id),
+      createStatusCell(task),
+      createPriorityCell(task),
+      createActionsCell(task)
+    );
     taskBody.appendChild(row);
   });
   updateCounters();
@@ -179,6 +243,49 @@ function updateCounters() {
 
 function findTask(localId) {
   return tasks.find((task) => task.localId === localId);
+}
+
+function parsePriority(value) {
+  if (value.trim() === '') {
+    throw new Error('Priority is required');
+  }
+
+  const priority = Number(value);
+  if (!Number.isInteger(priority) || priority < 0 || priority > UINT32_MAX) {
+    throw new Error(`Priority must be an integer between 0 and ${UINT32_MAX}`);
+  }
+  return priority;
+}
+
+function updateTaskPriority(task, input) {
+  const previousPriority = task.priority;
+
+  try {
+    if (!task.osTaskId) throw new Error('Task is not available in the runtime');
+
+    const nextPriority = parsePriority(input.value);
+    const status = callRuntime(
+      'browser_task_set_priority',
+      'number',
+      ['number', 'number'],
+      [task.osTaskId, nextPriority]
+    );
+
+    if (status !== OS_STATUS_OK) throw new Error(runtimeError());
+
+    task.priority = callRuntime(
+      'browser_task_get_priority',
+      'number',
+      ['number'],
+      [task.osTaskId]
+    );
+    appendLog(`${task.id}: priority changed from ${previousPriority} to ${task.priority}`);
+  } catch (error) {
+    task.priority = previousPriority;
+    appendLog(`${task.app}: ${error.message}`);
+  }
+
+  renderTasks();
 }
 
 function deleteOsTask(task) {
@@ -220,6 +327,28 @@ taskBody.addEventListener('click', (event) => {
   if (!button) return;
   const task = findTask(button.dataset.id);
   if (task) handleTaskAction(task, button.dataset.action);
+});
+
+taskBody.addEventListener('change', (event) => {
+  const input = event.target.closest('input[data-priority-task-id]');
+  if (!input) return;
+  const task = findTask(input.dataset.priorityTaskId);
+  if (task) updateTaskPriority(task, input);
+});
+
+taskBody.addEventListener('keydown', (event) => {
+  const input = event.target.closest('input[data-priority-task-id]');
+  if (!input) return;
+
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    input.blur();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    const task = findTask(input.dataset.priorityTaskId);
+    if (task) input.value = String(task.priority);
+    input.blur();
+  }
 });
 
 function openPicker() {
@@ -285,8 +414,23 @@ dropZone.addEventListener('drop', (event) => handleFiles(event.dataTransfer.file
 function refreshRuntimeState() {
   if (!runtime) return;
   tasks.forEach((task) => {
-    if (task.osTaskId) task.status = stateToStatus(task.osTaskId);
+    if (task.osTaskId) {
+      task.status = stateToStatus(task.osTaskId);
+      task.priority = callRuntime(
+        'browser_task_get_priority',
+        'number',
+        ['number'],
+        [task.osTaskId]
+      );
+    }
   });
+
+  const activeElement = document.activeElement;
+  if (activeElement && activeElement.matches('input[data-priority-task-id]')) {
+    updateCounters();
+    return;
+  }
+
   renderTasks();
 }
 
