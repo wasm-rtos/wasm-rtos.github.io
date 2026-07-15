@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
-  <title id="title">WA OS Logo</title>
-  <desc id="desc">Logo created with ChatGPT Plus for the WA OS organization.</desc>
+  <title id="title">wasm-rtos favicon</title>
+  <desc id="desc">Square wasm-rtos logo used as the site favicon.</desc>
   <defs>
     <radialGradient id="bg" cx="50%" cy="47%" r="72%">
       <stop offset="0%" stop-color="#242424"/>
