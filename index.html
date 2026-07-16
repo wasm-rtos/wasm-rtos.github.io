@@ -86,11 +86,11 @@
             <div class="scheduler-timeline-header">
               <div>
                 <h3 id="scheduler-timeline-title">Scheduler timeline</h3>
-                <p>Actual scheduler slice duration · rolling 10 seconds</p>
+                <p>Actual scheduler slice duration · adaptive rolling window</p>
               </div>
               <div class="scheduler-timeline-meta" aria-label="Timeline status">
                 <span id="schedulerTimelineStatus" class="timeline-live"><i aria-hidden="true"></i> Live</span>
-                <span>10 s window</span>
+                <span id="schedulerTimelineWindow">10 s window</span>
               </div>
             </div>
             <div id="schedulerTimelineShell" class="scheduler-timeline-shell">

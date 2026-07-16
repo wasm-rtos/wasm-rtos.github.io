@@ -14,10 +14,14 @@ let traceDurationsPointer = 0;
 let nextTraceColor = 0;
 let traceStatusMode = '';
 let traceLastSummaryAt = 0;
+let traceWindowMs = 10000;
 
 const FUEL_TELEMETRY_WINDOW_MS = 1000;
 const TASK_ACTIVITY_PULSE_MS = 1500;
-const TRACE_WINDOW_MS = 10000;
+const TRACE_MIN_WINDOW_MS = 10000;
+const TRACE_MAX_WINDOW_MS = 60000;
+const TRACE_MIN_VISIBLE_SLICES = 4;
+const TRACE_VISIBLE_SLICES_PER_TASK = 2;
 const TRACE_BATCH_SIZE = 256;
 const TRACE_MAX_EVENTS = 4096;
 const TRACE_HEADER_HEIGHT = 44;
@@ -86,6 +90,7 @@ const schedulerTimelineShell = document.querySelector('#schedulerTimelineShell')
 const schedulerTimelineEmpty = document.querySelector('#schedulerTimelineEmpty');
 const schedulerTimelineTooltip = document.querySelector('#schedulerTimelineTooltip');
 const schedulerTimelineStatus = document.querySelector('#schedulerTimelineStatus');
+const schedulerTimelineWindow = document.querySelector('#schedulerTimelineWindow');
 const schedulerTimelineSummary = document.querySelector('#schedulerTimelineSummary');
 const schedulerTimelineContext = schedulerTimelineCanvas.getContext('2d');
 
@@ -221,7 +226,7 @@ function initializeTraceTelemetry() {
 }
 
 function pruneTraceEvents() {
-  const cutoff = traceClockMs - TRACE_WINDOW_MS - 750;
+  const cutoff = traceClockMs - traceWindowMs - 750;
   let removeCount = 0;
 
   while (
@@ -235,6 +240,24 @@ function pruneTraceEvents() {
   if (traceEvents.length > TRACE_MAX_EVENTS) {
     traceEvents.splice(0, traceEvents.length - TRACE_MAX_EVENTS);
   }
+}
+
+function updateTraceWindow() {
+  if (fuelRatePerMs > 0) {
+    const targetSlices = Math.max(
+      TRACE_MIN_VISIBLE_SLICES,
+      tasks.length * TRACE_VISIBLE_SLICES_PER_TASK
+    );
+    const sliceIntervalMs = fuelPerSlice / fuelRatePerMs;
+    const desiredWindowMs = Math.ceil(sliceIntervalMs * targetSlices / 1000) * 1000;
+    traceWindowMs = Math.min(
+      TRACE_MAX_WINDOW_MS,
+      Math.max(TRACE_MIN_WINDOW_MS, desiredWindowMs)
+    );
+  }
+
+  const label = `${Math.round(traceWindowMs / 1000)} s window`;
+  if (schedulerTimelineWindow.textContent !== label) schedulerTimelineWindow.textContent = label;
 }
 
 function consumeTraceEvents() {
@@ -416,7 +439,7 @@ function updateTimelineAccessibility(totals, totalDuration, hasVisibleEvents) {
 
   if (!hasVisibleEvents) {
     schedulerTimelineSummary.textContent = tasks.length
-      ? 'No scheduler slices are visible in the current ten second window.'
+      ? 'No scheduler slices are visible in the current rolling window.'
       : 'No scheduler activity recorded.';
   } else {
     const details = tasks.map((task) => {
@@ -432,6 +455,7 @@ function updateTimelineAccessibility(totals, totalDuration, hasVisibleEvents) {
 
 function drawSchedulerTimeline() {
   updateTimelineStatus();
+  updateTraceWindow();
   if (traceRuntimeSupported) consumeTraceEvents();
   else traceClockMs = runtimeStartedAt ? performance.now() - runtimeStartedAt : 0;
 
@@ -441,7 +465,7 @@ function drawSchedulerTimeline() {
   const trackLeft = labelWidth;
   const trackRight = Math.max(trackLeft + 1, width - 16);
   const trackWidth = Math.max(1, trackRight - trackLeft);
-  const windowStart = traceClockMs - TRACE_WINDOW_MS;
+  const windowStart = traceClockMs - traceWindowMs;
   const taskIds = new Set(tasks.map((task) => task.localId));
   const visibleEvents = traceEvents.filter((traceEvent) => (
     taskIds.has(traceEvent.localId)
@@ -474,7 +498,7 @@ function drawSchedulerTimeline() {
     context.lineTo(x + 0.5, height);
     context.stroke();
 
-    const secondsAgo = 10 - index * 2;
+    const secondsAgo = Math.round(traceWindowMs / 1000 * (1 - index / 5));
     context.fillStyle = index === 5 ? '#bfc7c3' : '#676767';
     context.textAlign = index === 0 ? 'left' : index === 5 ? 'right' : 'center';
     context.fillText(index === 5 ? 'NOW' : `−${secondsAgo}s`, x, TRACE_HEADER_HEIGHT - 8);
@@ -540,8 +564,8 @@ function drawSchedulerTimeline() {
       traceClockMs,
       traceEvent.startedAtMs + Math.max(traceEvent.durationMs, 0.001)
     );
-    const x = trackLeft + (eventStart - windowStart) / TRACE_WINDOW_MS * trackWidth;
-    const proportionalWidth = (eventEnd - eventStart) / TRACE_WINDOW_MS * trackWidth;
+    const x = trackLeft + (eventStart - windowStart) / traceWindowMs * trackWidth;
+    const proportionalWidth = (eventEnd - eventStart) / traceWindowMs * trackWidth;
     const barWidth = Math.max(TRACE_MIN_BAR_WIDTH, proportionalWidth);
     const barY = rowTop + 14;
     const barHeight = TRACE_ROW_HEIGHT - 28;
