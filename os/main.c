@@ -24,15 +24,25 @@
 #define BROWSER_MAX_FUEL_PER_MS 40000U
 #define BROWSER_MAX_ELAPSED_BUDGET_MS 100U
 #define BROWSER_ERROR_MESSAGE_SIZE 256U
+#define BROWSER_TRACE_EVENT_CAPACITY 4096U
 
 typedef struct BrowserTaskRecord
 {
     uint32_t task_id;
+    uint32_t observed_run_count;
     OsTaskHandle task;
     uint8_t* wasm_bytes;
     char* entry_function_name;
     struct BrowserTaskRecord* next;
 } BrowserTaskRecord;
+
+typedef struct BrowserTraceEvent
+{
+    uint32_t sequence;
+    uint32_t task_id;
+    double started_at_ms;
+    double duration_ms;
+} BrowserTraceEvent;
 
 static BrowserTaskRecord* g_task_records;
 static double g_hal_start_time_ms;
@@ -41,8 +51,24 @@ static uint32_t g_fuel_per_ms = BROWSER_DEFAULT_FUEL_PER_MS;
 static uint32_t g_last_budget_time_ms;
 static uint32_t g_scheduled_slice_count;
 static double g_fuel_budget;
+static BrowserTraceEvent g_trace_events[BROWSER_TRACE_EVENT_CAPACITY];
+static uint32_t g_trace_next_sequence = 1U;
+static uint32_t g_trace_event_count;
 static int g_runtime_initialized;
 static char g_error_message[BROWSER_ERROR_MESSAGE_SIZE];
+
+static double browser_elapsed_now_ms(void)
+{
+    double elapsed_ms;
+
+    if (g_hal_start_time_ms == 0.0)
+    {
+        return 0.0;
+    }
+
+    elapsed_ms = emscripten_get_now() - g_hal_start_time_ms;
+    return elapsed_ms > 0.0 ? elapsed_ms : 0.0;
+}
 
 static uint32_t browser_clock_now_ms(void* context)
 {
@@ -63,6 +89,63 @@ static BrowserTaskRecord* browser_find_record(uint32_t task_id)
     }
 
     return NULL;
+}
+
+static void browser_trace_reset(void)
+{
+    memset(g_trace_events, 0, sizeof(g_trace_events));
+    g_trace_next_sequence = 1U;
+    g_trace_event_count = 0U;
+}
+
+static void browser_trace_append(uint32_t task_id, double started_at_ms, double duration_ms)
+{
+    uint32_t sequence = g_trace_next_sequence;
+    BrowserTraceEvent* event = &g_trace_events[(sequence - 1U) % BROWSER_TRACE_EVENT_CAPACITY];
+
+    event->sequence = sequence;
+    event->task_id = task_id;
+    event->started_at_ms = started_at_ms;
+    event->duration_ms = duration_ms > 0.0 ? duration_ms : 0.0;
+
+    ++g_trace_next_sequence;
+    if (g_trace_event_count < BROWSER_TRACE_EVENT_CAPACITY)
+    {
+        ++g_trace_event_count;
+    }
+}
+
+static void browser_trace_capture_slice(double started_at_ms, double finished_at_ms)
+{
+    BrowserTaskRecord* record = g_task_records;
+
+    while (record != NULL)
+    {
+        uint32_t run_count = os_task_get_run_count(record->task);
+
+        if (run_count > record->observed_run_count)
+        {
+            record->observed_run_count = run_count;
+            browser_trace_append(record->task_id, started_at_ms, finished_at_ms - started_at_ms);
+            return;
+        }
+
+        record->observed_run_count = run_count;
+        record = record->next;
+    }
+}
+
+static const BrowserTraceEvent* browser_trace_find(uint32_t sequence)
+{
+    const BrowserTraceEvent* event;
+
+    if (sequence == 0U || g_trace_event_count == 0U)
+    {
+        return NULL;
+    }
+
+    event = &g_trace_events[(sequence - 1U) % BROWSER_TRACE_EVENT_CAPACITY];
+    return event->sequence == sequence ? event : NULL;
 }
 
 static char* browser_duplicate_string(const char* value)
@@ -155,20 +238,7 @@ void hal_shutdown(void)
 
 uint32_t hal_get_time_ms(void)
 {
-    double elapsed_ms;
-
-    if (g_hal_start_time_ms == 0.0)
-    {
-        return 0U;
-    }
-
-    elapsed_ms = emscripten_get_now() - g_hal_start_time_ms;
-    if (elapsed_ms <= 0.0)
-    {
-        return 0U;
-    }
-
-    return (uint32_t)elapsed_ms;
+    return (uint32_t)browser_elapsed_now_ms();
 }
 
 void hal_panic(const char* message)
@@ -216,6 +286,7 @@ int browser_runtime_init(void)
     g_last_budget_time_ms = g_clock_now_ms;
     g_fuel_budget = 0.0;
     g_scheduled_slice_count = 0U;
+    browser_trace_reset();
     return (int)OS_STATUS_OK;
 }
 
@@ -233,6 +304,7 @@ void browser_runtime_shutdown(void)
     g_last_budget_time_ms = 0U;
     g_fuel_budget = 0.0;
     g_scheduled_slice_count = 0U;
+    browser_trace_reset();
     browser_clear_error();
     g_runtime_initialized = 0;
 }
@@ -305,6 +377,7 @@ uint32_t browser_task_create(
     }
 
     record->task_id = os_task_get_id(record->task);
+    record->observed_run_count = os_task_get_run_count(record->task);
     record->next = g_task_records;
     g_task_records = record;
     browser_clear_error();
@@ -422,7 +495,12 @@ int browser_runtime_step(uint32_t now_ms, uint32_t max_slices)
 
     for (slice = 0U; slice < max_slices; ++slice)
     {
+        double slice_started_at_ms = browser_elapsed_now_ms();
+        double slice_finished_at_ms;
+
         status = os_schedule();
+        slice_finished_at_ms = browser_elapsed_now_ms();
+        browser_trace_capture_slice(slice_started_at_ms, slice_finished_at_ms);
         if (status == OS_STATUS_NO_READY_TASKS)
         {
             return (int)OS_STATUS_OK;
@@ -490,6 +568,77 @@ EMSCRIPTEN_KEEPALIVE
 uint32_t browser_runtime_get_scheduled_slice_count(void)
 {
     return g_scheduled_slice_count;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_trace_get_oldest_sequence(void)
+{
+    uint32_t latest_sequence;
+
+    if (g_trace_event_count == 0U)
+    {
+        return 0U;
+    }
+
+    latest_sequence = g_trace_next_sequence - 1U;
+    return latest_sequence - g_trace_event_count + 1U;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_trace_get_latest_sequence(void)
+{
+    return g_trace_event_count == 0U ? 0U : g_trace_next_sequence - 1U;
+}
+
+EMSCRIPTEN_KEEPALIVE
+double browser_trace_get_clock_ms(void)
+{
+    return browser_elapsed_now_ms();
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_trace_read(
+    uint32_t first_sequence,
+    uint32_t max_events,
+    uint32_t* out_task_ids,
+    double* out_started_at_ms,
+    double* out_duration_ms
+)
+{
+    uint32_t oldest_sequence = browser_trace_get_oldest_sequence();
+    uint32_t latest_sequence = browser_trace_get_latest_sequence();
+    uint32_t copied = 0U;
+    uint32_t sequence;
+
+    if (oldest_sequence == 0U || max_events == 0U ||
+        out_task_ids == NULL || out_started_at_ms == NULL || out_duration_ms == NULL)
+    {
+        return 0U;
+    }
+
+    if (first_sequence < oldest_sequence)
+    {
+        first_sequence = oldest_sequence;
+    }
+
+    for (sequence = first_sequence;
+         sequence <= latest_sequence && copied < max_events;
+         ++sequence)
+    {
+        const BrowserTraceEvent* event = browser_trace_find(sequence);
+
+        if (event == NULL)
+        {
+            break;
+        }
+
+        out_task_ids[copied] = event->task_id;
+        out_started_at_ms[copied] = event->started_at_ms;
+        out_duration_ms[copied] = event->duration_ms;
+        ++copied;
+    }
+
+    return copied;
 }
 
 EMSCRIPTEN_KEEPALIVE

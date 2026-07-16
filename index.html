@@ -82,6 +82,27 @@
               <tbody id="taskBody"></tbody>
             </table>
           </div>
+          <section class="scheduler-timeline" aria-labelledby="scheduler-timeline-title">
+            <div class="scheduler-timeline-header">
+              <div>
+                <h3 id="scheduler-timeline-title">Scheduler timeline</h3>
+                <p>Actual scheduler slice duration · rolling 10 seconds</p>
+              </div>
+              <div class="scheduler-timeline-meta" aria-label="Timeline status">
+                <span id="schedulerTimelineStatus" class="timeline-live"><i aria-hidden="true"></i> Live</span>
+                <span>10 s window</span>
+              </div>
+            </div>
+            <div id="schedulerTimelineShell" class="scheduler-timeline-shell">
+              <canvas id="schedulerTimelineCanvas" class="scheduler-timeline-canvas" aria-label="Live scheduler timeline. Launch a task to start tracing execution."></canvas>
+              <div id="schedulerTimelineEmpty" class="scheduler-timeline-empty">
+                <strong>No task slices yet</strong>
+                <span>Launch a WASM task to see scheduler activity.</span>
+              </div>
+              <div id="schedulerTimelineTooltip" class="scheduler-timeline-tooltip" role="tooltip" hidden></div>
+            </div>
+            <p id="schedulerTimelineSummary" class="visually-hidden" aria-live="polite">No scheduler activity recorded.</p>
+          </section>
         </section>
       </section>
 
