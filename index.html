@@ -105,6 +105,31 @@
       </aside>
     </div>
 
+    <section class="card fuel-control" aria-labelledby="fuel-control-title">
+      <div class="fuel-control-copy">
+        <p class="eyebrow">Virtual CPU limiter</p>
+        <h2 id="fuel-control-title">WASM execution budget</h2>
+        <p>Limit how much wasm3 work may be scheduled per millisecond. The RTOS clock keeps advancing at zero fuel, so timers and deadlines remain meaningful while task execution is paused.</p>
+      </div>
+      <div class="fuel-control-panel">
+        <div class="fuel-rate-heading">
+          <div>
+            <strong id="fuelRateFrequency">2.40 Mfuel/s</strong>
+            <span id="fuelRatePerMs">2,400 fuel/ms budget</span>
+          </div>
+          <output id="fuelRateActual" for="fuelRateSlider fuelRateInput">0 fuel/ms scheduled</output>
+        </div>
+        <label class="fuel-slider-label" for="fuelRateSlider">Fuel rate</label>
+        <input id="fuelRateSlider" class="fuel-slider" type="range" min="0" max="40000" step="100" value="2400">
+        <div class="fuel-input-row">
+          <label for="fuelRateInput">Fuel / ms</label>
+          <input id="fuelRateInput" class="fuel-number-input" type="number" min="0" max="40000" step="100" value="2400" inputmode="numeric">
+          <span>0 pauses tasks</span>
+        </div>
+        <p class="fuel-calibration-note">Mfuel/s is a wasm3 fuel budget, not hardware MHz. An ESP32 MHz equivalent needs a benchmark-derived calibration profile.</p>
+      </div>
+    </section>
+
     <section class="card stats-bar" aria-label="Runtime statistics">
       <div class="stat cpu-stat"><div class="cpu-meter"><span>CPU</span><strong id="cpuValue">0%</strong><div class="progress"><i id="cpuProgress" style="width:0%"></i></div></div></div>
       <div class="stat"><span>MEMORY</span><strong id="memoryValue">0 MB</strong><div class="progress"><i id="memoryProgress" style="width:0%"></i></div></div>
