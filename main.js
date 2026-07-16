@@ -32,8 +32,10 @@ const taskBody = document.querySelector('#taskBody');
 const activeBadge = document.querySelector('#activeBadge');
 const activeRatio = document.querySelector('#activeRatio');
 const activeProgress = document.querySelector('#activeProgress');
-const queueCount = document.querySelector('#queueCount');
-const queueProgress = document.querySelector('#queueProgress');
+const waitingCount = document.querySelector('#waitingCount');
+const waitingProgress = document.querySelector('#waitingProgress');
+const timerCount = document.querySelector('#timerCount');
+const timerProgress = document.querySelector('#timerProgress');
 const consoleLog = document.querySelector('#consoleLog');
 const runtimeClock = document.querySelector('#runtimeClock');
 const runtimeStatus = document.querySelector('#runtimeStatus');
@@ -222,13 +224,30 @@ function renderTasks() {
 }
 
 function updateCounters() {
-  const active = tasks.filter((task) => ['Running', 'Ready', 'Waiting'].includes(task.status)).length;
-  const queued = tasks.filter((task) => ['Ready', 'Waiting'].includes(task.status)).length;
+  let ready = tasks.filter((task) => ['Running', 'Ready'].includes(task.status)).length;
+  let waiting = tasks.filter((task) => task.status === 'Waiting').length;
+  let total = ready + waiting;
+  let timers = 0;
+
+  if (runtime) {
+    try {
+      total = callRuntime('browser_runtime_get_task_count', 'number');
+      ready = callRuntime('browser_runtime_get_ready_task_count', 'number');
+      waiting = callRuntime('browser_runtime_get_waiting_task_count', 'number');
+      timers = callRuntime('browser_runtime_get_timer_count', 'number');
+    } catch (error) {
+      // Keep UI-derived counters while an older cached runtime is replaced.
+    }
+  }
+
+  const active = ready + waiting;
   activeBadge.textContent = `${tasks.length} ${tasks.length === 1 ? 'Task' : 'Tasks'}`;
-  activeRatio.textContent = `${active} / ${tasks.length}`;
-  activeProgress.style.width = `${tasks.length ? (active / tasks.length) * 100 : 0}%`;
-  queueCount.textContent = queued;
-  queueProgress.style.width = `${Math.min(100, queued * 25)}%`;
+  activeRatio.textContent = `${ready} / ${total}`;
+  activeProgress.style.width = `${total ? (ready / total) * 100 : 0}%`;
+  waitingCount.textContent = waiting;
+  waitingProgress.style.width = `${total ? (waiting / total) * 100 : 0}%`;
+  timerCount.textContent = timers;
+  timerProgress.style.width = `${Math.min(100, timers * 25)}%`;
 
   const cpu = Math.min(100, active * 12);
   cpuValue.textContent = `${cpu}%`;

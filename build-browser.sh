@@ -40,7 +40,7 @@ if [ "${#wasm3_sources[@]}" -eq 0 ]; then
     exit 1
 fi
 
-exported_functions='["_main","_malloc","_free","_browser_runtime_init","_browser_runtime_shutdown","_browser_task_create","_browser_task_delete","_browser_task_suspend","_browser_task_resume","_browser_task_set_priority","_browser_runtime_step","_browser_runtime_set_slices_per_frame","_browser_task_get_state","_browser_task_get_priority","_browser_task_get_run_count","_browser_task_get_exit_reason","_browser_task_get_exit_code","_browser_runtime_get_task_count","_browser_runtime_get_ready_task_count","_browser_runtime_get_waiting_task_count","_browser_runtime_get_last_error"]'
+exported_functions='["_main","_malloc","_free","_browser_runtime_init","_browser_runtime_shutdown","_browser_task_create","_browser_task_delete","_browser_task_suspend","_browser_task_resume","_browser_task_set_priority","_browser_runtime_step","_browser_runtime_set_slices_per_frame","_browser_task_get_state","_browser_task_get_priority","_browser_task_get_run_count","_browser_task_get_exit_reason","_browser_task_get_exit_code","_browser_runtime_get_task_count","_browser_runtime_get_ready_task_count","_browser_runtime_get_waiting_task_count","_browser_runtime_get_timer_count","_browser_runtime_get_last_error"]'
 exported_runtime_methods='["ccall","cwrap","UTF8ToString","HEAPU8"]'
 
 rm -f "$OUTPUT_JS" "$OUTPUT_WASM"

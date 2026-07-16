@@ -32,9 +32,15 @@ typedef struct BrowserTaskRecord
 
 static BrowserTaskRecord* g_task_records;
 static double g_hal_start_time_ms;
+static uint32_t g_clock_now_ms;
 static uint32_t g_slices_per_frame = BROWSER_DEFAULT_SLICES_PER_FRAME;
 static int g_runtime_initialized;
 static char g_error_message[BROWSER_ERROR_MESSAGE_SIZE];
+
+static uint32_t browser_clock_now_ms(void* context)
+{
+    return context != NULL ? *(const uint32_t*)context : 0U;
+}
 
 static BrowserTaskRecord* browser_find_record(uint32_t task_id)
 {
@@ -167,6 +173,7 @@ void hal_panic(const char* message)
 EMSCRIPTEN_KEEPALIVE
 int browser_runtime_init(void)
 {
+    OsClockPort clock_port;
     OsStatus status;
 
     if (g_runtime_initialized)
@@ -180,6 +187,20 @@ int browser_runtime_init(void)
     if (status != OS_STATUS_OK)
     {
         browser_set_error("os_init", status);
+        hal_shutdown();
+        return (int)status;
+    }
+
+    g_clock_now_ms = hal_get_time_ms();
+    clock_port.now_ms = browser_clock_now_ms;
+    clock_port.arm_wakeup = NULL;
+    clock_port.cancel_wakeup = NULL;
+    clock_port.context = &g_clock_now_ms;
+    status = os_clock_port_set(&clock_port);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_clock_port_set", status);
+        os_shutdown();
         hal_shutdown();
         return (int)status;
     }
@@ -198,6 +219,7 @@ void browser_runtime_shutdown(void)
 
     browser_free_all_records();
     hal_shutdown();
+    g_clock_now_ms = 0U;
     browser_clear_error();
     g_runtime_initialized = 0;
 }
@@ -372,10 +394,11 @@ int browser_runtime_step(uint32_t now_ms, uint32_t max_slices)
         }
     }
 
-    status = os_update_time_ms(now_ms);
+    g_clock_now_ms = now_ms;
+    status = os_clock_poll();
     if (status != OS_STATUS_OK)
     {
-        browser_set_error("os_update_time_ms", status);
+        browser_set_error("os_clock_poll", status);
         return (int)status;
     }
 
@@ -470,6 +493,12 @@ EMSCRIPTEN_KEEPALIVE
 uint32_t browser_runtime_get_waiting_task_count(void)
 {
     return os_get_waiting_task_count();
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_runtime_get_timer_count(void)
+{
+    return os_get_timer_count();
 }
 
 EMSCRIPTEN_KEEPALIVE
