@@ -1,6 +1,12 @@
 const tasks = [];
 let runtime = null;
 let runtimeStartedAt = 0;
+let fuelPerSlice = 10000;
+let fuelRatePerMs = 2400;
+let previousScheduledSlices = 0;
+let previousFuelSampleAt = 0;
+
+const FUEL_TELEMETRY_WINDOW_MS = 1000;
 
 const OS_STATUS_OK = 0;
 const OS_TASK_READY = 0;
@@ -48,6 +54,13 @@ const fileInput = document.querySelector('#wasmFile');
 const dropZone = document.querySelector('#dropZone');
 const launchButton = document.querySelector('#launchButton');
 const newTaskButton = document.querySelector('#newTaskButton');
+const fuelRateSlider = document.querySelector('#fuelRateSlider');
+const fuelRateInput = document.querySelector('#fuelRateInput');
+const fuelRateFrequency = document.querySelector('#fuelRateFrequency');
+const fuelRatePerMsLabel = document.querySelector('#fuelRatePerMs');
+const fuelRateActual = document.querySelector('#fuelRateActual');
+
+const fuelNumberFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 
 function timeStamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -77,6 +90,63 @@ function runtimeError() {
 function callRuntime(name, returnType, argumentTypes = [], argumentsList = []) {
   if (!runtime) throw new Error('wasm-rtos runtime is not initialized');
   return runtime.ccall(name, returnType, argumentTypes, argumentsList);
+}
+
+function clampFuelRate(value) {
+  if (!Number.isFinite(value)) return fuelRatePerMs;
+  return Math.min(40000, Math.max(0, Math.round(value)));
+}
+
+function renderFuelRate() {
+  const megaFuelPerSecond = fuelRatePerMs / 1000;
+  fuelRateFrequency.textContent = fuelRatePerMs === 0
+    ? 'Paused'
+    : `${megaFuelPerSecond.toFixed(megaFuelPerSecond < 10 ? 2 : 1)} Mfuel/s`;
+  fuelRatePerMsLabel.textContent = `${fuelNumberFormat.format(fuelRatePerMs)} fuel/ms budget`;
+}
+
+function setFuelRate(value, updateInput = true) {
+  fuelRatePerMs = clampFuelRate(Number(value));
+  fuelRateSlider.value = String(fuelRatePerMs);
+  if (updateInput) fuelRateInput.value = String(fuelRatePerMs);
+  renderFuelRate();
+
+  if (runtime) {
+    callRuntime(
+      'browser_runtime_set_fuel_per_ms',
+      null,
+      ['number'],
+      [fuelRatePerMs]
+    );
+    resetFuelTelemetry();
+  }
+}
+
+function resetFuelTelemetry() {
+  previousScheduledSlices = runtime
+    ? callRuntime('browser_runtime_get_scheduled_slice_count', 'number') >>> 0
+    : 0;
+  previousFuelSampleAt = performance.now();
+  fuelRateActual.textContent = '0 fuel/ms scheduled';
+}
+
+function updateFuelTelemetry() {
+  if (!runtime) return;
+
+  const now = performance.now();
+  const elapsedMs = now - previousFuelSampleAt;
+  if (elapsedMs < FUEL_TELEMETRY_WINDOW_MS) return;
+
+  const scheduledSlices = callRuntime(
+    'browser_runtime_get_scheduled_slice_count',
+    'number'
+  ) >>> 0;
+  const sliceDelta = (scheduledSlices - previousScheduledSlices) >>> 0;
+  const scheduledFuelPerMs = sliceDelta * fuelPerSlice / elapsedMs;
+
+  fuelRateActual.textContent = `${fuelNumberFormat.format(scheduledFuelPerMs)} fuel/ms scheduled`;
+  previousScheduledSlices = scheduledSlices;
+  previousFuelSampleAt = now;
 }
 
 async function detectEntryPoint(wasmBytes) {
@@ -443,6 +513,7 @@ function refreshRuntimeState() {
       );
     }
   });
+  updateFuelTelemetry();
 
   const activeElement = document.activeElement;
   if (activeElement && activeElement.matches('input[data-priority-task-id]')) {
@@ -475,6 +546,8 @@ async function initializeRuntime() {
     });
     const status = callRuntime('browser_runtime_init', 'number', [], []);
     if (status !== OS_STATUS_OK) throw new Error(runtimeError());
+    fuelPerSlice = callRuntime('browser_runtime_get_fuel_per_slice', 'number') || fuelPerSlice;
+    setFuelRate(fuelRatePerMs);
     runtimeStartedAt = performance.now();
     runtimeStatus.textContent = 'Runtime: OK';
     runtimeStatusDetail.textContent = 'wasm-rtos is ready';
@@ -489,6 +562,12 @@ async function initializeRuntime() {
 
 setInterval(refreshRuntimeState, 250);
 setInterval(updateRuntimeClock, 1000);
+fuelRateSlider.addEventListener('input', () => setFuelRate(fuelRateSlider.value));
+fuelRateInput.addEventListener('input', () => {
+  if (fuelRateInput.value !== '') setFuelRate(fuelRateInput.value, false);
+});
+fuelRateInput.addEventListener('change', () => setFuelRate(fuelRateInput.value || fuelRatePerMs));
+renderFuelRate();
 initializeRuntime();
 
 const canvas = document.querySelector('#previewCanvas');

@@ -17,8 +17,12 @@
 #include <string.h>
 
 #define BROWSER_DEFAULT_STACK_SIZE (64U * 1024U)
-#define BROWSER_DEFAULT_SLICES_PER_FRAME 4U
 #define BROWSER_MAX_SLICES_PER_FRAME 64U
+/* Keep this aligned with the core scheduler's OS_TASK_SLICE_FUEL value. */
+#define BROWSER_FUEL_PER_SLICE 10000U
+#define BROWSER_DEFAULT_FUEL_PER_MS 2400U
+#define BROWSER_MAX_FUEL_PER_MS 40000U
+#define BROWSER_MAX_ELAPSED_BUDGET_MS 100U
 #define BROWSER_ERROR_MESSAGE_SIZE 256U
 
 typedef struct BrowserTaskRecord
@@ -33,7 +37,10 @@ typedef struct BrowserTaskRecord
 static BrowserTaskRecord* g_task_records;
 static double g_hal_start_time_ms;
 static uint32_t g_clock_now_ms;
-static uint32_t g_slices_per_frame = BROWSER_DEFAULT_SLICES_PER_FRAME;
+static uint32_t g_fuel_per_ms = BROWSER_DEFAULT_FUEL_PER_MS;
+static uint32_t g_last_budget_time_ms;
+static uint32_t g_scheduled_slice_count;
+static double g_fuel_budget;
 static int g_runtime_initialized;
 static char g_error_message[BROWSER_ERROR_MESSAGE_SIZE];
 
@@ -206,6 +213,9 @@ int browser_runtime_init(void)
     }
 
     g_runtime_initialized = 1;
+    g_last_budget_time_ms = g_clock_now_ms;
+    g_fuel_budget = 0.0;
+    g_scheduled_slice_count = 0U;
     return (int)OS_STATUS_OK;
 }
 
@@ -220,6 +230,9 @@ void browser_runtime_shutdown(void)
     browser_free_all_records();
     hal_shutdown();
     g_clock_now_ms = 0U;
+    g_last_budget_time_ms = 0U;
+    g_fuel_budget = 0.0;
+    g_scheduled_slice_count = 0U;
     browser_clear_error();
     g_runtime_initialized = 0;
 }
@@ -402,10 +415,6 @@ int browser_runtime_step(uint32_t now_ms, uint32_t max_slices)
         return (int)status;
     }
 
-    if (max_slices == 0U)
-    {
-        max_slices = 1U;
-    }
     if (max_slices > BROWSER_MAX_SLICES_PER_FRAME)
     {
         max_slices = BROWSER_MAX_SLICES_PER_FRAME;
@@ -423,6 +432,7 @@ int browser_runtime_step(uint32_t now_ms, uint32_t max_slices)
             browser_set_error("os_schedule", status);
             return (int)status;
         }
+        ++g_scheduled_slice_count;
     }
 
     return (int)OS_STATUS_OK;
@@ -431,6 +441,8 @@ int browser_runtime_step(uint32_t now_ms, uint32_t max_slices)
 EMSCRIPTEN_KEEPALIVE
 void browser_runtime_set_slices_per_frame(uint32_t slice_count)
 {
+    uint32_t fuel_per_ms;
+
     if (slice_count == 0U)
     {
         slice_count = 1U;
@@ -439,7 +451,45 @@ void browser_runtime_set_slices_per_frame(uint32_t slice_count)
     {
         slice_count = BROWSER_MAX_SLICES_PER_FRAME;
     }
-    g_slices_per_frame = slice_count;
+    fuel_per_ms = slice_count * BROWSER_FUEL_PER_SLICE * 60U / 1000U;
+    if (fuel_per_ms > BROWSER_MAX_FUEL_PER_MS)
+    {
+        fuel_per_ms = BROWSER_MAX_FUEL_PER_MS;
+    }
+    g_fuel_per_ms = fuel_per_ms;
+    g_fuel_budget = 0.0;
+    g_last_budget_time_ms = hal_get_time_ms();
+}
+
+EMSCRIPTEN_KEEPALIVE
+void browser_runtime_set_fuel_per_ms(uint32_t fuel_per_ms)
+{
+    if (fuel_per_ms > BROWSER_MAX_FUEL_PER_MS)
+    {
+        fuel_per_ms = BROWSER_MAX_FUEL_PER_MS;
+    }
+
+    g_fuel_per_ms = fuel_per_ms;
+    g_fuel_budget = 0.0;
+    g_last_budget_time_ms = hal_get_time_ms();
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_runtime_get_fuel_per_ms(void)
+{
+    return g_fuel_per_ms;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_runtime_get_fuel_per_slice(void)
+{
+    return BROWSER_FUEL_PER_SLICE;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_runtime_get_scheduled_slice_count(void)
+{
+    return g_scheduled_slice_count;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -509,7 +559,42 @@ const char* browser_runtime_get_last_error(void)
 
 static void browser_main_loop(void)
 {
-    (void)browser_runtime_step(hal_get_time_ms(), g_slices_per_frame);
+    uint32_t now_ms = hal_get_time_ms();
+    uint32_t elapsed_ms = now_ms - g_last_budget_time_ms;
+    uint32_t slice_count;
+    const double max_budget =
+        (double)BROWSER_MAX_SLICES_PER_FRAME * (double)BROWSER_FUEL_PER_SLICE;
+
+    g_last_budget_time_ms = now_ms;
+    if (elapsed_ms > BROWSER_MAX_ELAPSED_BUDGET_MS)
+    {
+        elapsed_ms = BROWSER_MAX_ELAPSED_BUDGET_MS;
+    }
+
+    if (g_fuel_per_ms == 0U)
+    {
+        g_fuel_budget = 0.0;
+        (void)browser_runtime_step(now_ms, 0U);
+        return;
+    }
+
+    g_fuel_budget += (double)elapsed_ms * (double)g_fuel_per_ms;
+    if (g_fuel_budget > max_budget)
+    {
+        g_fuel_budget = max_budget;
+    }
+
+    slice_count = (uint32_t)(g_fuel_budget / (double)BROWSER_FUEL_PER_SLICE);
+    if (slice_count > BROWSER_MAX_SLICES_PER_FRAME)
+    {
+        slice_count = BROWSER_MAX_SLICES_PER_FRAME;
+    }
+    if (slice_count > 0U)
+    {
+        g_fuel_budget -= (double)slice_count * (double)BROWSER_FUEL_PER_SLICE;
+    }
+
+    (void)browser_runtime_step(now_ms, slice_count);
 }
 
 int main(void)
