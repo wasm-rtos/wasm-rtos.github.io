@@ -101,9 +101,10 @@ function clampFuelRate(value) {
 
 function renderFuelRate() {
   const megaFuelPerSecond = fuelRatePerMs / 1000;
+  const fractionDigits = megaFuelPerSecond < 0.1 ? 3 : megaFuelPerSecond < 10 ? 2 : 1;
   fuelRateFrequency.textContent = fuelRatePerMs === 0
     ? 'Paused'
-    : `${megaFuelPerSecond.toFixed(megaFuelPerSecond < 10 ? 2 : 1)} Mfuel/s`;
+    : `${megaFuelPerSecond.toFixed(fractionDigits)} Mfuel/s`;
   fuelRatePerMsLabel.textContent = `${fuelNumberFormat.format(fuelRatePerMs)} fuel/ms budget`;
 }
 
