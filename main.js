@@ -364,12 +364,37 @@ function truncateCanvasText(context, value, maxWidth) {
   return `${shortened}…`;
 }
 
-function drawTracePulsePath(context, startX, endX, highY, lowY, startsBeforeWindow) {
+function mergeTracePulses(pulses) {
+  const merged = [];
+
+  [...pulses]
+    .sort((left, right) => left.startX - right.startX)
+    .forEach((pulse) => {
+      const previous = merged[merged.length - 1];
+      if (previous && pulse.startX <= previous.endX + 0.5) {
+        previous.endX = Math.max(previous.endX, pulse.endX);
+        return;
+      }
+      merged.push({ ...pulse });
+    });
+
+  return merged;
+}
+
+function drawTraceSignalPath(context, pulses, trackLeft, trackRight, highY, lowY) {
   context.beginPath();
-  context.moveTo(startX, startsBeforeWindow ? highY : lowY);
-  if (!startsBeforeWindow) context.lineTo(startX, highY);
-  context.lineTo(endX, highY);
-  context.lineTo(endX, lowY);
+  context.moveTo(trackLeft, pulses[0]?.startsBeforeWindow ? highY : lowY);
+
+  pulses.forEach((pulse, index) => {
+    if (index > 0 || !pulse.startsBeforeWindow) {
+      context.lineTo(pulse.startX, lowY);
+      context.lineTo(pulse.startX, highY);
+    }
+    context.lineTo(pulse.endX, highY);
+    context.lineTo(pulse.endX, lowY);
+  });
+
+  context.lineTo(trackRight, lowY);
 }
 
 function resizeSchedulerTimeline() {
@@ -537,24 +562,14 @@ function drawSchedulerTimeline() {
       24,
       rowCenter + 10
     );
-
-    const lowY = rowTop + TRACE_ROW_HEIGHT - 13;
-    context.save();
-    context.globalAlpha = 0.34;
-    context.strokeStyle = task.traceColor;
-    context.lineWidth = 1.5;
-    context.lineCap = 'square';
-    context.beginPath();
-    context.moveTo(trackLeft, lowY);
-    context.lineTo(trackRight, lowY);
-    context.stroke();
-    context.restore();
   });
 
   context.save();
   context.beginPath();
   context.rect(trackLeft, TRACE_HEADER_HEIGHT, trackWidth, height - TRACE_HEADER_HEIGHT);
   context.clip();
+
+  const signalPulses = new Map(tasks.map((task) => [task.localId, []]));
 
   visibleEvents.forEach((traceEvent) => {
     const taskIndex = tasks.findIndex((task) => task.localId === traceEvent.localId);
@@ -575,24 +590,11 @@ function drawSchedulerTimeline() {
     const lowY = rowTop + TRACE_ROW_HEIGHT - 13;
     const startsBeforeWindow = traceEvent.startedAtMs < windowStart;
 
-    context.save();
-    context.globalAlpha = 0.18;
-    context.shadowColor = task.traceColor;
-    context.shadowBlur = 8;
-    context.strokeStyle = task.traceColor;
-    context.lineWidth = 5;
-    context.lineJoin = 'miter';
-    context.lineCap = 'square';
-    drawTracePulsePath(context, x, pulseEndX, highY, lowY, startsBeforeWindow);
-    context.stroke();
-    context.restore();
-
-    context.strokeStyle = task.traceColor;
-    context.lineWidth = 2;
-    context.lineJoin = 'miter';
-    context.lineCap = 'square';
-    drawTracePulsePath(context, x, pulseEndX, highY, lowY, startsBeforeWindow);
-    context.stroke();
+    signalPulses.get(task.localId).push({
+      startX: x,
+      endX: pulseEndX,
+      startsBeforeWindow
+    });
 
     traceHitRegions.push({
       x: Math.max(trackLeft, x - 4),
@@ -602,6 +604,32 @@ function drawSchedulerTimeline() {
       traceEvent,
       task
     });
+  });
+
+  tasks.forEach((task, taskIndex) => {
+    const rowTop = TRACE_HEADER_HEIGHT + taskIndex * TRACE_ROW_HEIGHT;
+    const highY = rowTop + 13;
+    const lowY = rowTop + TRACE_ROW_HEIGHT - 13;
+    const pulses = mergeTracePulses(signalPulses.get(task.localId));
+
+    context.save();
+    context.globalAlpha = 0.18;
+    context.shadowColor = task.traceColor;
+    context.shadowBlur = 8;
+    context.strokeStyle = task.traceColor;
+    context.lineWidth = 5;
+    context.lineJoin = 'miter';
+    context.lineCap = 'square';
+    drawTraceSignalPath(context, pulses, trackLeft, trackRight, highY, lowY);
+    context.stroke();
+    context.restore();
+
+    context.strokeStyle = task.traceColor;
+    context.lineWidth = 2;
+    context.lineJoin = 'miter';
+    context.lineCap = 'square';
+    drawTraceSignalPath(context, pulses, trackLeft, trackRight, highY, lowY);
+    context.stroke();
   });
   context.restore();
 
