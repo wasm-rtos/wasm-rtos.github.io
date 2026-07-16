@@ -7,6 +7,7 @@ let previousScheduledSlices = 0;
 let previousFuelSampleAt = 0;
 
 const FUEL_TELEMETRY_WINDOW_MS = 1000;
+const TASK_ACTIVITY_PULSE_MS = 1500;
 
 const OS_STATUS_OK = 0;
 const OS_TASK_READY = 0;
@@ -61,6 +62,7 @@ const fuelRatePerMsLabel = document.querySelector('#fuelRatePerMs');
 const fuelRateActual = document.querySelector('#fuelRateActual');
 
 const fuelNumberFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+const integerNumberFormat = new Intl.NumberFormat('en-US');
 
 function timeStamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -175,6 +177,10 @@ function stateToStatus(taskId) {
 }
 
 function createOsTask(task) {
+  task.runCount = 0;
+  task.lastRunAt = 0;
+  task.activityUntil = 0;
+
   const wasmPointer = runtime._malloc(task.wasmBytes.length);
   if (!wasmPointer) throw new Error('Unable to allocate memory for the guest module');
 
@@ -216,6 +222,44 @@ function createStatusCell(task) {
 
   status.append(icon, document.createTextNode(task.status));
   cell.appendChild(status);
+  return cell;
+}
+
+function formatLastRun(lastRunAt, now) {
+  if (!lastRunAt) return 'Never';
+
+  const elapsedSeconds = Math.max(0, Math.floor((now - lastRunAt) / 1000));
+  if (elapsedSeconds < 1) return 'Just now';
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
+
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  return `${elapsedHours}h ago`;
+}
+
+function createActivityCell(task, now) {
+  const cell = document.createElement('td');
+  const activity = document.createElement('span');
+  const indicator = document.createElement('span');
+  const count = document.createElement('strong');
+  const lastRun = document.createElement('small');
+  const runLabel = task.runCount === 1 ? 'run' : 'runs';
+  const lastRunLabel = formatLastRun(task.lastRunAt, now);
+
+  activity.className = 'task-activity';
+  indicator.className = 'task-activity-dot';
+  indicator.setAttribute('aria-hidden', 'true');
+  count.textContent = `${integerNumberFormat.format(task.runCount)} ${runLabel}`;
+  lastRun.textContent = lastRunLabel;
+  activity.setAttribute(
+    'aria-label',
+    `${integerNumberFormat.format(task.runCount)} ${runLabel}. Last run: ${lastRunLabel}`
+  );
+
+  activity.append(indicator, count, lastRun);
+  cell.appendChild(activity);
   return cell;
 }
 
@@ -279,12 +323,16 @@ function createActionsCell(task) {
 
 function renderTasks() {
   taskBody.replaceChildren();
+  const now = performance.now();
   tasks.forEach((task) => {
     const row = document.createElement('tr');
+    row.className = 'task-row';
+    if (task.activityUntil > now) row.classList.add('is-recently-active');
     row.append(
       createTextCell(task.app),
       createTextCell(task.id),
       createStatusCell(task),
+      createActivityCell(task, now),
       createPriorityCell(task),
       createActionsCell(task)
     );
@@ -462,6 +510,9 @@ async function addFile(file) {
     status: 'Ready',
     priority: 5,
     osTaskId: 0,
+    runCount: 0,
+    lastRunAt: 0,
+    activityUntil: 0,
     wasmBytes,
     entryPoint: await detectEntryPoint(wasmBytes)
   };
@@ -502,6 +553,7 @@ dropZone.addEventListener('drop', (event) => handleFiles(event.dataTransfer.file
 
 function refreshRuntimeState() {
   if (!runtime) return;
+  const sampledAt = performance.now();
   tasks.forEach((task) => {
     if (task.osTaskId) {
       task.status = stateToStatus(task.osTaskId);
@@ -511,6 +563,17 @@ function refreshRuntimeState() {
         ['number'],
         [task.osTaskId]
       );
+      const runCount = callRuntime(
+        'browser_task_get_run_count',
+        'number',
+        ['number'],
+        [task.osTaskId]
+      ) >>> 0;
+      if (runCount !== task.runCount) {
+        task.runCount = runCount;
+        task.lastRunAt = sampledAt;
+        task.activityUntil = sampledAt + TASK_ACTIVITY_PULSE_MS;
+      }
     }
   });
   updateFuelTelemetry();
