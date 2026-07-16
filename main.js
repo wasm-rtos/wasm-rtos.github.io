@@ -27,7 +27,7 @@ const TRACE_MAX_EVENTS = 4096;
 const TRACE_HEADER_HEIGHT = 44;
 const TRACE_ROW_HEIGHT = 54;
 const TRACE_FOOTER_HEIGHT = 10;
-const TRACE_MIN_BAR_WIDTH = 2.2;
+const TRACE_MIN_PULSE_WIDTH = 5;
 const TRACE_COLORS = ['#71e7b3', '#8bb8ff', '#d39cff', '#ffbd69', '#ff8585', '#69d2e7'];
 
 const traceEvents = [];
@@ -364,15 +364,37 @@ function truncateCanvasText(context, value, maxWidth) {
   return `${shortened}…`;
 }
 
-function canvasRoundedRect(context, x, y, width, height, radius) {
-  const safeRadius = Math.min(radius, width / 2, height / 2);
+function mergeTracePulses(pulses) {
+  const merged = [];
+
+  [...pulses]
+    .sort((left, right) => left.startX - right.startX)
+    .forEach((pulse) => {
+      const previous = merged[merged.length - 1];
+      if (previous && pulse.startX <= previous.endX + 0.5) {
+        previous.endX = Math.max(previous.endX, pulse.endX);
+        return;
+      }
+      merged.push({ ...pulse });
+    });
+
+  return merged;
+}
+
+function drawTraceSignalPath(context, pulses, trackLeft, trackRight, highY, lowY) {
   context.beginPath();
-  context.moveTo(x + safeRadius, y);
-  context.arcTo(x + width, y, x + width, y + height, safeRadius);
-  context.arcTo(x + width, y + height, x, y + height, safeRadius);
-  context.arcTo(x, y + height, x, y, safeRadius);
-  context.arcTo(x, y, x + width, y, safeRadius);
-  context.closePath();
+  context.moveTo(trackLeft, pulses[0]?.startsBeforeWindow ? highY : lowY);
+
+  pulses.forEach((pulse, index) => {
+    if (index > 0 || !pulse.startsBeforeWindow) {
+      context.lineTo(pulse.startX, lowY);
+      context.lineTo(pulse.startX, highY);
+    }
+    context.lineTo(pulse.endX, highY);
+    context.lineTo(pulse.endX, lowY);
+  });
+
+  context.lineTo(trackRight, lowY);
 }
 
 function resizeSchedulerTimeline() {
@@ -540,18 +562,14 @@ function drawSchedulerTimeline() {
       24,
       rowCenter + 10
     );
-
-    context.strokeStyle = 'rgba(255,255,255,.12)';
-    context.beginPath();
-    context.moveTo(trackLeft, rowCenter);
-    context.lineTo(trackRight, rowCenter);
-    context.stroke();
   });
 
   context.save();
   context.beginPath();
   context.rect(trackLeft, TRACE_HEADER_HEIGHT, trackWidth, height - TRACE_HEADER_HEIGHT);
   context.clip();
+
+  const signalPulses = new Map(tasks.map((task) => [task.localId, []]));
 
   visibleEvents.forEach((traceEvent) => {
     const taskIndex = tasks.findIndex((task) => task.localId === traceEvent.localId);
@@ -566,31 +584,52 @@ function drawSchedulerTimeline() {
     );
     const x = trackLeft + (eventStart - windowStart) / traceWindowMs * trackWidth;
     const proportionalWidth = (eventEnd - eventStart) / traceWindowMs * trackWidth;
-    const barWidth = Math.max(TRACE_MIN_BAR_WIDTH, proportionalWidth);
-    const barY = rowTop + 14;
-    const barHeight = TRACE_ROW_HEIGHT - 28;
+    const pulseWidth = Math.max(TRACE_MIN_PULSE_WIDTH, proportionalWidth);
+    const pulseEndX = Math.min(trackRight, x + pulseWidth);
+    const highY = rowTop + 13;
+    const lowY = rowTop + TRACE_ROW_HEIGHT - 13;
+    const startsBeforeWindow = traceEvent.startedAtMs < windowStart;
 
-    context.save();
-    context.globalAlpha = 0.2;
-    context.shadowColor = task.traceColor;
-    context.shadowBlur = 10;
-    context.fillStyle = task.traceColor;
-    canvasRoundedRect(context, x, barY, barWidth, barHeight, 3);
-    context.fill();
-    context.restore();
-
-    context.fillStyle = task.traceColor;
-    canvasRoundedRect(context, x, barY, barWidth, barHeight, 3);
-    context.fill();
+    signalPulses.get(task.localId).push({
+      startX: x,
+      endX: pulseEndX,
+      startsBeforeWindow
+    });
 
     traceHitRegions.push({
-      x: Math.max(trackLeft, x - 3),
-      y: barY - 4,
-      width: Math.max(8, barWidth + 6),
-      height: barHeight + 8,
+      x: Math.max(trackLeft, x - 4),
+      y: highY - 5,
+      width: Math.max(10, pulseEndX - x + 8),
+      height: lowY - highY + 10,
       traceEvent,
       task
     });
+  });
+
+  tasks.forEach((task, taskIndex) => {
+    const rowTop = TRACE_HEADER_HEIGHT + taskIndex * TRACE_ROW_HEIGHT;
+    const highY = rowTop + 13;
+    const lowY = rowTop + TRACE_ROW_HEIGHT - 13;
+    const pulses = mergeTracePulses(signalPulses.get(task.localId));
+
+    context.save();
+    context.globalAlpha = 0.18;
+    context.shadowColor = task.traceColor;
+    context.shadowBlur = 8;
+    context.strokeStyle = task.traceColor;
+    context.lineWidth = 5;
+    context.lineJoin = 'miter';
+    context.lineCap = 'square';
+    drawTraceSignalPath(context, pulses, trackLeft, trackRight, highY, lowY);
+    context.stroke();
+    context.restore();
+
+    context.strokeStyle = task.traceColor;
+    context.lineWidth = 2;
+    context.lineJoin = 'miter';
+    context.lineCap = 'square';
+    drawTraceSignalPath(context, pulses, trackLeft, trackRight, highY, lowY);
+    context.stroke();
   });
   context.restore();
 
