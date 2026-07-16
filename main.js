@@ -6,6 +6,8 @@ let fuelRatePerMs = 2400;
 let previousScheduledSlices = 0;
 let previousFuelSampleAt = 0;
 
+const FUEL_TELEMETRY_WINDOW_MS = 1000;
+
 const OS_STATUS_OK = 0;
 const OS_TASK_READY = 0;
 const OS_TASK_RUNNING = 1;
@@ -116,6 +118,7 @@ function setFuelRate(value, updateInput = true) {
       ['number'],
       [fuelRatePerMs]
     );
+    resetFuelTelemetry();
   }
 }
 
@@ -132,7 +135,7 @@ function updateFuelTelemetry() {
 
   const now = performance.now();
   const elapsedMs = now - previousFuelSampleAt;
-  if (elapsedMs <= 0) return;
+  if (elapsedMs < FUEL_TELEMETRY_WINDOW_MS) return;
 
   const scheduledSlices = callRuntime(
     'browser_runtime_get_scheduled_slice_count',
@@ -545,7 +548,6 @@ async function initializeRuntime() {
     if (status !== OS_STATUS_OK) throw new Error(runtimeError());
     fuelPerSlice = callRuntime('browser_runtime_get_fuel_per_slice', 'number') || fuelPerSlice;
     setFuelRate(fuelRatePerMs);
-    resetFuelTelemetry();
     runtimeStartedAt = performance.now();
     runtimeStatus.textContent = 'Runtime: OK';
     runtimeStatusDetail.textContent = 'wasm-rtos is ready';
