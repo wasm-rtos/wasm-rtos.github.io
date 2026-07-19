@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>wasm-rtos</title>
-  <meta name="description" content="A portable FreeRTOS-style scheduler and synchronization layer for WebAssembly tasks in browsers, ESP32, and native hardware.">
+  <meta name="description" content="A portable scheduler for WebAssembly tasks in browsers, ESP32, and native hardware.">
   <meta name="theme-color" content="#111111">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
@@ -25,7 +25,6 @@
     </a>
     <nav class="site-nav" aria-label="Primary navigation">
       <a href="#runtime">Live Runtime</a>
-      <a href="#rtos-api">RTOS API</a>
       <a href="https://github.com/wasm-rtos/wasm-rtos" target="_blank" rel="noreferrer">GitHub ↗</a>
     </nav>
   </header>
@@ -49,10 +48,9 @@
           <section class="hero" aria-labelledby="hero-title">
             <p class="eyebrow">wasm-rtos · portable RTOS core</p>
             <h1 id="hero-title">Run WebAssembly tasks everywhere.</h1>
-            <p>One FreeRTOS-style task model for browsers, ESP32, and native hardware. Try the live runtime here, then deploy the same scheduler and synchronization API on your target.</p>
+            <p>One FreeRTOS-style task model for browsers, ESP32, and native hardware. Try the live runtime here, then run the same WebAssembly workloads on your target.</p>
             <div class="hero-links">
-              <a class="primary-link" href="#rtos-api">Explore the RTOS API</a>
-              <a class="text-link" href="https://github.com/wasm-rtos/wasm-rtos" target="_blank" rel="noreferrer">View source ↗</a>
+              <a class="primary-link" href="https://github.com/wasm-rtos/wasm-rtos" target="_blank" rel="noreferrer">View source ↗</a>
             </div>
           </section>
 
@@ -175,69 +173,6 @@
       <div class="runtime-ok"><span class="status-dot"></span><div><strong id="runtimeStatus">Runtime: Loading</strong><small id="runtimeStatusDetail">Initializing wasm-rtos</small></div></div>
     </section>
 
-    <section id="rtos-api" class="capabilities" aria-labelledby="capabilities-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">FreeRTOS-style primitives</p>
-          <h2 id="capabilities-title">Real synchronization. Portable timing.</h2>
-        </div>
-        <p>Tasks share one import surface on every platform. The host supplies scheduling time; wasm-rtos supplies priorities, blocking, wakeups, and deterministic state transitions.</p>
-      </div>
-
-      <div class="feature-grid">
-        <article class="feature-card">
-          <span class="feature-number">01</span>
-          <h3>Mutex + priority inheritance</h3>
-          <p>Priority inversion is handled automatically while higher-priority tasks wait for an owned mutex.</p>
-          <div class="api-tags"><code>os_mutex_lock</code><code>os_mutex_unlock</code></div>
-        </article>
-        <article class="feature-card">
-          <span class="feature-number">02</span>
-          <h3>Semaphores + event flags</h3>
-          <p>Coordinate resources or wait for any/all event bits with optional clear-on-exit and timeouts.</p>
-          <div class="api-tags"><code>os_semaphore_take</code><code>os_event_group_wait_bits</code></div>
-        </article>
-        <article class="feature-card">
-          <span class="feature-number">03</span>
-          <h3>Blocking queues</h3>
-          <p>Fixed-size FIFO messaging supports direct handoff, priority-ordered wakeups, and bounded waits.</p>
-          <div class="api-tags"><code>os_queue_send_wait</code><code>os_queue_receive_wait</code></div>
-        </article>
-        <article class="feature-card">
-          <span class="feature-number">04</span>
-          <h3>Notifications + timers</h3>
-          <p>Lightweight per-task notifications pair with one-shot or auto-reload software timers.</p>
-          <div class="api-tags"><code>os_task_notify_take</code><code>os_timer_start</code></div>
-        </article>
-      </div>
-
-      <div class="platform-panel card">
-        <div class="platform-copy">
-          <p class="eyebrow">Cross-platform clock port</p>
-          <h3>Deadlines follow the platform, not a periodic tick.</h3>
-          <p>Use polling in a browser or connect the same API to a hardware alarm. Before every new wait or timer deadline, wasm-rtos synchronizes with the monotonic clock.</p>
-          <ul class="platform-list">
-            <li><strong>Browser</strong><span>event loop + monotonic milliseconds</span></li>
-            <li><strong>ESP32</strong><span>hardware timer + deferred wakeup</span></li>
-            <li><strong>Native</strong><span>polling or platform alarm callbacks</span></li>
-          </ul>
-        </div>
-        <pre class="code-sample" aria-label="Clock port example"><code>OsClockPort clock = {
-    .now_ms = platform_now_ms,
-    .arm_wakeup = platform_arm,
-    .cancel_wakeup = platform_cancel,
-    .context = &amp;platform_clock,
-};
-
-os_clock_port_set(&amp;clock);</code></pre>
-      </div>
-
-      <div class="contract-grid" aria-label="Runtime safety contracts">
-        <article><span>Stable queue delivery</span><p>Blocked receives retain a WASM memory offset, never a transient native pointer.</p></article>
-        <article><span>Snapshot guard</span><p>Waiting tasks and tasks with attached timers return <code>OS_STATUS_BUSY</code> until RTOS state can be serialized.</p></article>
-        <article><span>Wrap-safe time</span><p>Large elapsed-time jumps are processed in safe chunks, so timers and waits cannot be stranded.</p></article>
-      </div>
-    </section>
   </main>
 </body>
 </html>
