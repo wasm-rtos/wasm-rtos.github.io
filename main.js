@@ -78,6 +78,7 @@ const cpuValue = document.querySelector('#cpuValue');
 const cpuProgress = document.querySelector('#cpuProgress');
 const fileInput = document.querySelector('#wasmFile');
 const dropZone = document.querySelector('#dropZone');
+const pageDropOverlay = document.querySelector('#pageDropOverlay');
 const launchButton = document.querySelector('#launchButton');
 const newTaskButton = document.querySelector('#newTaskButton');
 const fuelRateSlider = document.querySelector('#fuelRateSlider');
@@ -1084,6 +1085,51 @@ function handleFiles(files) {
   Array.from(files).forEach((file) => addFile(file).catch((error) => appendLog(`${file.name}: ${error.message}`)));
 }
 
+let pageFileDragDepth = 0;
+
+function dragContainsFiles(event) {
+  return Array.from(event.dataTransfer?.types || []).includes('Files');
+}
+
+function setPageDropActive(active) {
+  pageDropOverlay.classList.toggle('is-active', active);
+  pageDropOverlay.setAttribute('aria-hidden', String(!active));
+}
+
+function resetPageFileDrag() {
+  pageFileDragDepth = 0;
+  setPageDropActive(false);
+}
+
+function handlePageDragEnter(event) {
+  if (!dragContainsFiles(event)) return;
+  event.preventDefault();
+  pageFileDragDepth += 1;
+  setPageDropActive(true);
+}
+
+function handlePageDragOver(event) {
+  if (!dragContainsFiles(event)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+  setPageDropActive(true);
+}
+
+function handlePageDragLeave(event) {
+  if (pageFileDragDepth === 0) return;
+  event.preventDefault();
+  pageFileDragDepth -= 1;
+  if (pageFileDragDepth === 0) setPageDropActive(false);
+}
+
+function handlePageDrop(event) {
+  if (!dragContainsFiles(event)) return;
+  event.preventDefault();
+  const files = event.dataTransfer.files;
+  resetPageFileDrag();
+  if (files.length > 0) handleFiles(files);
+}
+
 ['click', 'keydown'].forEach((type) => {
   dropZone.addEventListener(type, (event) => {
     if (event.type === 'click' || event.key === 'Enter' || event.key === ' ') openPicker();
@@ -1092,15 +1138,11 @@ function handleFiles(files) {
 launchButton.addEventListener('click', (event) => { event.stopPropagation(); openPicker(); });
 newTaskButton.addEventListener('click', openPicker);
 fileInput.addEventListener('change', () => { handleFiles(fileInput.files); fileInput.value = ''; });
-['dragenter', 'dragover'].forEach((type) => dropZone.addEventListener(type, (event) => {
-  event.preventDefault();
-  dropZone.classList.add('is-dragover');
-}));
-['dragleave', 'drop'].forEach((type) => dropZone.addEventListener(type, (event) => {
-  event.preventDefault();
-  dropZone.classList.remove('is-dragover');
-}));
-dropZone.addEventListener('drop', (event) => handleFiles(event.dataTransfer.files));
+document.addEventListener('dragenter', handlePageDragEnter, true);
+document.addEventListener('dragover', handlePageDragOver, true);
+document.addEventListener('dragleave', handlePageDragLeave, true);
+document.addEventListener('drop', handlePageDrop, true);
+document.addEventListener('dragend', resetPageFileDrag, true);
 
 function refreshRuntimeState() {
   if (!runtime) return;
