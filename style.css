@@ -207,6 +207,9 @@ button:disabled { cursor: default; opacity: .45; }
 .lcd-state.is-error strong { color: var(--accent-error); }
 
 .tool-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 4px 10px;
   border-radius: 5px;
   background: var(--gray-5);
@@ -215,6 +218,7 @@ button:disabled { cursor: default; opacity: .45; }
   white-space: nowrap;
 }
 .tool-link:hover { background: var(--gray-6); color: var(--gray-10); }
+.tool-link svg { width: 15px; height: 15px; fill: currentColor; flex: none; }
 
 /* ---------- Panels ---------- */
 
