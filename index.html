@@ -26,7 +26,7 @@
         <a class="brand" href="https://github.com/wasm-rtos" target="_blank" rel="noreferrer" aria-label="wasm-rtos on GitHub">
           <img src="wa-os-logo-horizontal.svg" alt="" width="70" height="27">
         </a>
-        <div class="well" role="group" aria-label="Panels">
+        <div class="segmented" role="group" aria-label="Panels">
           <button id="toggleLibrary" class="tool-button is-on" type="button" aria-pressed="true" title="Library (L)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M7.5 3.5v13"/></svg>
             <span class="visually-hidden">Library</span>
@@ -68,7 +68,7 @@
       </div>
 
       <div class="toolbar-group toolbar-right">
-        <div class="well" role="group" aria-label="Execution">
+        <div class="segmented" role="group" aria-label="Execution">
           <button id="runButton" class="tool-button transport-button" type="button" aria-pressed="true" title="Run / pause execution (Space)">
             <svg class="icon-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5v11l9-5.5z"/></svg>
             <svg class="icon-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h3v11H6zM11 4.5h3v11h-3z"/></svg>
@@ -76,7 +76,7 @@
           </button>
           <button id="loadButton" class="tool-button transport-button" type="button" title="Load .wasm program (O)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13.5V4M6 8l4-4 4 4M4 13v3h12v-3"/></svg>
-            <span>Load</span>
+            <span class="visually-hidden">Load .wasm program</span>
           </button>
         </div>
         <a class="tool-link" href="https://github.com/wasm-rtos/wasm-rtos" target="_blank" rel="noreferrer">Source ↗</a>
