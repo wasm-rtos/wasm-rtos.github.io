@@ -213,16 +213,29 @@ const Board = (() => {
     return node;
   }
 
-  // Pointer interaction: drag a chip to move it, drag empty board to pan.
+  // Pointer interaction: left-drag a chip to move it; middle-drag, one
+  // finger on touch screens, or Alt + left-drag on a trackpad pans; a left click on empty board
+  // clears the selection.
   let gesture = null;
+
+  // Stop the browser's middle-click autoscroll inside the board.
+  workspace.addEventListener('mousedown', (event) => {
+    if (event.button === 1) event.preventDefault();
+  });
 
   workspace.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 && event.button !== 1) return;
     if (event.target.closest('.workspace-hud')) return;
 
-    const chip = event.button === 0 ? event.target.closest('.chip') : null;
+    const pan = event.button === 1 || event.altKey || event.pointerType === 'touch';
+    const chip = pan ? null : event.target.closest('.chip');
     const nodeElement = chip?.closest('.node');
     workspace.setPointerCapture(event.pointerId);
+
+    if (!pan && !nodeElement) {
+      gesture = { kind: 'click' };
+      return;
+    }
 
     if (nodeElement) {
       const node = nodes.get(nodeElement.dataset.nodeId);
@@ -254,6 +267,7 @@ const Board = (() => {
     const dx = event.clientX - gesture.startX;
     const dy = event.clientY - gesture.startY;
 
+    if (gesture.kind === 'click') return;
     if (gesture.kind === 'node') {
       gesture.node.x = Math.round((gesture.originX + dx / view.zoom) / SNAP) * SNAP;
       gesture.node.y = Math.round((gesture.originY + dy / view.zoom) / SNAP) * SNAP;
@@ -268,11 +282,12 @@ const Board = (() => {
 
   function endGesture() {
     if (!gesture) return;
-    if (gesture.kind === 'node') {
+    if (gesture.kind === 'click') {
+      select(null);
+    } else if (gesture.kind === 'node') {
       gesture.node.element.classList.remove('is-dragging');
     } else {
       workspace.classList.remove('is-panning');
-      if (!gesture.moved) select(null);
     }
     gesture = null;
     saveState();
@@ -282,17 +297,13 @@ const Board = (() => {
   workspace.addEventListener('pointercancel', endGesture);
 
   workspace.addEventListener('wheel', (event) => {
+    // The wheel always zooms around the cursor; trackpad pinch arrives as
+    // a wheel event with ctrlKey and a finer delta.
     event.preventDefault();
     const rect = workspace.getBoundingClientRect();
-    if (event.ctrlKey || event.metaKey) {
-      const factor = Math.exp(-event.deltaY * (event.deltaMode === 1 ? 0.05 : 0.0025));
-      zoomAt(event.clientX - rect.left, event.clientY - rect.top, view.zoom * factor);
-    } else {
-      view.x -= event.deltaX;
-      view.y -= event.deltaY;
-      applyView();
-      saveState();
-    }
+    const rate = event.deltaMode === 1 ? 0.05 : event.ctrlKey ? 0.01 : 0.0015;
+    const factor = Math.exp(-event.deltaY * rate);
+    zoomAt(event.clientX - rect.left, event.clientY - rect.top, view.zoom * factor);
   }, { passive: false });
 
   document.querySelector('#zoomIn').addEventListener('click', () => zoomCenter(1.25));

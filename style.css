@@ -465,7 +465,7 @@ button:disabled { cursor: default; opacity: .45; }
   position: relative;
   overflow: hidden;
   background: var(--gray-2);
-  cursor: grab;
+  cursor: default;
   touch-action: none;
 }
 .workspace.is-panning { cursor: grabbing; }
