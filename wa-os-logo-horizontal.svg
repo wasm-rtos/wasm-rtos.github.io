@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="140" height="54" viewBox="0 0 140 54" shape-rendering="geometricPrecision">
   <title>WA OS vector logo</title>
   <desc>Logo created with ChatGPT Plus for the WA OS organization.</desc>
-  <rect width="140" height="54" fill="#242424"/>
+  <rect width="140" height="54" fill="none"/>
 
   <!-- left badge border -->
   <path fill="#f4f4f4" fill-rule="evenodd" d="

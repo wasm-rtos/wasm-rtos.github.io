@@ -67,7 +67,7 @@ const Board = (() => {
 
     const context = gridContext;
     context.setTransform(scale, 0, 0, scale, 0, 0);
-    context.fillStyle = '#2d2d2d';
+    context.fillStyle = '#3a3a3a';
     context.fillRect(0, 0, width, height);
 
     const drawLines = (step, color) => {
@@ -91,11 +91,11 @@ const Board = (() => {
       context.stroke();
     };
 
-    drawLines(GRID_MINOR, '#333333');
-    drawLines(GRID_MAJOR, '#3d3d3d');
+    drawLines(GRID_MINOR, '#404040');
+    drawLines(GRID_MAJOR, '#4a4a4a');
 
     // Board origin
-    context.strokeStyle = '#474747';
+    context.strokeStyle = '#565656';
     context.beginPath();
     context.moveTo(Math.round(view.x) + 0.5, 0);
     context.lineTo(Math.round(view.x) + 0.5, height);

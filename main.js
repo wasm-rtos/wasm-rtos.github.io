@@ -534,20 +534,20 @@ function drawSchedulerTimeline() {
 
   traceHitRegions.length = 0;
   context.clearRect(0, 0, width, height);
-  context.fillStyle = '#2d2d2d';
+  context.fillStyle = '#3a3a3a';
   context.fillRect(0, 0, width, height);
-  context.fillStyle = '#313131';
+  context.fillStyle = '#454545';
   context.fillRect(0, 0, labelWidth, height);
-  context.fillStyle = '#313131';
+  context.fillStyle = '#454545';
   context.fillRect(trackLeft, 0, width - trackLeft, TRACE_HEADER_HEIGHT);
 
   context.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-  context.fillStyle = '#808080';
+  context.fillStyle = '#a0a0a0';
   context.textBaseline = 'middle';
   context.textAlign = 'left';
   context.fillText(width < 560 ? 'TASK / SHARE' : 'TASK / EXECUTION SHARE', 10, TRACE_HEADER_HEIGHT / 2);
 
-  context.strokeStyle = '#3c3c3c';
+  context.strokeStyle = '#4a4a4a';
   context.lineWidth = 1;
   for (let index = 0; index <= 5; index += 1) {
     const x = trackLeft + trackWidth * index / 5;
@@ -557,12 +557,12 @@ function drawSchedulerTimeline() {
     context.stroke();
 
     const secondsAgo = Math.round(traceWindowMs / 1000 * (1 - index / 5));
-    context.fillStyle = index === 5 ? '#e7e7e7' : '#808080';
+    context.fillStyle = index === 5 ? '#f2f2f2' : '#a0a0a0';
     context.textAlign = index === 0 ? 'left' : index === 5 ? 'right' : 'center';
     context.fillText(index === 5 ? 'NOW' : `−${secondsAgo}s`, index === 0 ? x + 6 : x - (index === 5 ? 4 : 0), TRACE_HEADER_HEIGHT / 2);
   }
 
-  context.strokeStyle = '#000000';
+  context.strokeStyle = '#1c1c1c';
   context.beginPath();
   context.moveTo(0, TRACE_HEADER_HEIGHT - 0.5);
   context.lineTo(width, TRACE_HEADER_HEIGHT - 0.5);
@@ -576,7 +576,7 @@ function drawSchedulerTimeline() {
 
     context.fillStyle = taskIndex % 2 ? 'rgba(255,255,255,.012)' : 'rgba(255,255,255,.025)';
     context.fillRect(0, rowTop, width, TRACE_ROW_HEIGHT);
-    context.strokeStyle = '#262626';
+    context.strokeStyle = '#333333';
     context.beginPath();
     context.moveTo(0, rowTop + TRACE_ROW_HEIGHT - 0.5);
     context.lineTo(width, rowTop + TRACE_ROW_HEIGHT - 0.5);
@@ -588,12 +588,12 @@ function drawSchedulerTimeline() {
     context.fill();
 
     context.font = '600 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    context.fillStyle = '#e7e7e7';
+    context.fillStyle = '#f2f2f2';
     context.textAlign = 'left';
     context.fillText(truncateCanvasText(context, task.app, labelWidth - 34), 24, rowCenter - 7);
 
     context.font = '9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-    context.fillStyle = '#808080';
+    context.fillStyle = '#a0a0a0';
     const taskDetail = `${task.id} · ${share.toFixed(0)}% · ${formatTraceDuration(taskDuration)}`;
     context.fillText(truncateCanvasText(context, taskDetail, labelWidth - 24), 24, rowCenter + 9);
   });
@@ -661,14 +661,14 @@ function drawSchedulerTimeline() {
   });
   context.restore();
 
-  context.strokeStyle = '#000000';
+  context.strokeStyle = '#1c1c1c';
   context.beginPath();
   context.moveTo(trackLeft - 0.5, 0);
   context.lineTo(trackLeft - 0.5, height);
   context.stroke();
 
   // Playhead
-  context.strokeStyle = '#e7e7e7';
+  context.strokeStyle = '#f2f2f2';
   context.beginPath();
   context.moveTo(trackRight + 0.5, TRACE_HEADER_HEIGHT);
   context.lineTo(trackRight + 0.5, height);
