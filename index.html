@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>wasm-rtos</title>
   <meta name="description" content="A virtual board running WebAssembly programs on the wasm-rtos kernel, the same way they run on microcontrollers.">
-  <meta name="theme-color" content="#6f6f6e">
+  <meta name="theme-color" content="#505050">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
   <link rel="icon" type="image/png" sizes="48x48" href="favicon-48x48.png">
@@ -147,9 +147,11 @@
 
     <section id="editorPanel" class="editor" aria-label="Editors">
       <div id="editorResize" class="editor-resize" role="separator" aria-orientation="horizontal" aria-label="Resize editors" tabindex="0"></div>
-      <div class="editor-tabs" role="tablist" aria-label="Editor">
-        <button class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="timelinePane" id="timelineTab">Timeline</button>
-        <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="consolePane" id="consoleTab">Console</button>
+      <div class="editor-tabs">
+        <div class="well tabs-well" role="tablist" aria-label="Editor">
+          <button class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="timelinePane" id="timelineTab">Timeline</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="consolePane" id="consoleTab">Console</button>
+        </div>
         <div class="editor-tabs-meta">
           <span id="schedulerTimelineStatus" class="timeline-live"><i aria-hidden="true"></i> Live</span>
           <span id="schedulerTimelineWindow">10 s window</span>
