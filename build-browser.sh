@@ -34,7 +34,10 @@ if [ ! -d "$WASM3_SOURCE_DIR" ]; then
     exit 1
 fi
 
-mapfile -t wasm3_sources < <(find "$WASM3_SOURCE_DIR" -maxdepth 1 -type f -name '*.c' -print | sort)
+wasm3_sources=()
+while IFS= read -r wasm3_source; do
+    wasm3_sources+=("$wasm3_source")
+done < <(find "$WASM3_SOURCE_DIR" -maxdepth 1 -type f -name '*.c' -print | sort)
 if [ "${#wasm3_sources[@]}" -eq 0 ]; then
     echo "FAIL no wasm3 C sources found in $WASM3_SOURCE_DIR"
     exit 1
