@@ -162,7 +162,7 @@ function formatFuelRate() {
 
 function renderFuelRate() {
   lcdFuel.textContent = fuelRatePerMs === 0 ? '0' : formatFuelRate();
-  lcdFuelUnit.textContent = 'MFUEL/S';
+  lcdFuelUnit.textContent = 'Mfuel/s';
   cpuView.fuel.textContent = fuelRatePerMs === 0 ? '0' : formatFuelRate();
   runButton.setAttribute('aria-pressed', String(fuelRatePerMs > 0));
   renderRunState();

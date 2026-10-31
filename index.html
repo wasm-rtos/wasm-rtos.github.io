@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>wasm-rtos</title>
   <meta name="description" content="A virtual board running WebAssembly programs on the wasm-rtos kernel, the same way they run on microcontrollers.">
-  <meta name="theme-color" content="#4f4f4f">
+  <meta name="theme-color" content="#6f6f6e">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
   <link rel="icon" type="image/png" sizes="48x48" href="favicon-48x48.png">
@@ -27,7 +27,7 @@
           <img src="wa-os-logo-horizontal.svg" alt="" width="70" height="27">
           <span>wasm-rtos</span>
         </a>
-        <div class="segmented" role="group" aria-label="Panels">
+        <div class="well" role="group" aria-label="Panels">
           <button id="toggleLibrary" class="tool-button is-on" type="button" aria-pressed="true" title="Library (L)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M7.5 3.5v13"/></svg>
             <span class="visually-hidden">Library</span>
@@ -44,7 +44,32 @@
       </div>
 
       <div class="toolbar-group toolbar-center">
-        <div class="transport" role="group" aria-label="Execution">
+        <div class="lcd well" role="group" aria-label="Runtime display">
+          <div class="lcd-cell lcd-time">
+            <strong id="lcdClock">00:00:00</strong>
+            <span>Uptime</span>
+          </div>
+          <div class="lcd-cell">
+            <strong id="lcdTasks">0</strong>
+            <span>Tasks</span>
+          </div>
+          <div class="lcd-cell">
+            <strong id="lcdReady">0/0</strong>
+            <span>Ready</span>
+          </div>
+          <div class="lcd-cell lcd-wide">
+            <strong id="lcdFuel">2.40</strong>
+            <span id="lcdFuelUnit">Mfuel/s</span>
+          </div>
+          <div class="lcd-cell lcd-state">
+            <strong id="lcdState">LOAD</strong>
+            <span>State</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="toolbar-group toolbar-right">
+        <div class="well" role="group" aria-label="Execution">
           <button id="runButton" class="tool-button transport-button" type="button" aria-pressed="true" title="Run / pause execution (Space)">
             <svg class="icon-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5v11l9-5.5z"/></svg>
             <svg class="icon-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h3v11H6zM11 4.5h3v11h-3z"/></svg>
@@ -52,35 +77,9 @@
           </button>
           <button id="loadButton" class="tool-button transport-button" type="button" title="Load .wasm program (O)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13.5V4M6 8l4-4 4 4M4 13v3h12v-3"/></svg>
-            <span class="visually-hidden">Load .wasm program</span>
+            <span>Load</span>
           </button>
         </div>
-
-        <div class="lcd" role="group" aria-label="Runtime display">
-          <div class="lcd-cell lcd-time">
-            <strong id="lcdClock">00:00:00</strong>
-            <span>UPTIME</span>
-          </div>
-          <div class="lcd-cell">
-            <strong id="lcdTasks">0</strong>
-            <span>TASKS</span>
-          </div>
-          <div class="lcd-cell">
-            <strong id="lcdReady">0/0</strong>
-            <span>READY</span>
-          </div>
-          <div class="lcd-cell lcd-wide">
-            <strong id="lcdFuel">2.40</strong>
-            <span id="lcdFuelUnit">MFUEL/S</span>
-          </div>
-          <div class="lcd-cell lcd-state">
-            <strong id="lcdState">LOAD</strong>
-            <span>STATE</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="toolbar-group toolbar-right">
         <a class="tool-link" href="https://github.com/wasm-rtos/wasm-rtos" target="_blank" rel="noreferrer">Source ↗</a>
       </div>
     </header>
