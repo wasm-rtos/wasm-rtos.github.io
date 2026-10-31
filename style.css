@@ -107,9 +107,6 @@ button:disabled { cursor: default; opacity: .45; }
 
 .toolbar-group { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .toolbar-right { justify-content: flex-end; }
-.toolbar-center { position: relative; }
-/* Sits beside the runtime display without shifting it off center */
-.editor-toggle { position: absolute; left: calc(100% + 10px); }
 
 .brand {
   display: flex;
@@ -738,7 +735,6 @@ button:disabled { cursor: default; opacity: .45; }
   .app:not(.show-inspector) .inspector { display: none; }
   .toolbar { grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px; padding: 0 6px; }
   .toolbar-center { justify-content: center; }
-  .editor-toggle { position: static; }
   .lcd-cell:not(.lcd-time):not(.lcd-state) { display: none; }
   .brand, .tool-link, .workspace-hint { display: none; }
   .editor-tabs { justify-content: flex-start; }
