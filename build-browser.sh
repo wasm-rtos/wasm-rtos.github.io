@@ -34,6 +34,16 @@ if [ ! -d "$WASM3_SOURCE_DIR" ]; then
     exit 1
 fi
 
+# Every kernel source except hal.c: the browser provides its HAL in os/main.c.
+kernel_sources=()
+while IFS= read -r kernel_source; do
+    kernel_sources+=("$kernel_source")
+done < <(find "$WASM_RTOS_DIR" -maxdepth 1 -type f -name '*.c' ! -name 'hal.c' -print | sort)
+if [ "${#kernel_sources[@]}" -eq 0 ]; then
+    echo "FAIL no kernel C sources found in $WASM_RTOS_DIR"
+    exit 1
+fi
+
 wasm3_sources=()
 while IFS= read -r wasm3_source; do
     wasm3_sources+=("$wasm3_source")
@@ -59,7 +69,7 @@ rm -f "$OUTPUT_JS" "$OUTPUT_WASM"
     -I"$WASM_RTOS_DIR" \
     -I"$WASM3_SOURCE_DIR" \
     os/main.c \
-    "$WASM_RTOS_DIR/os.c" \
+    "${kernel_sources[@]}" \
     "${wasm3_sources[@]}" \
     -sWASM=1 \
     -sALLOW_MEMORY_GROWTH=1 \
