@@ -24,6 +24,10 @@ on:
       - "build-browser.sh"
       - ".github/workflows/build-browser.yml"
 
+env:
+  # Bump deliberately; the generated runtime is committed to the site.
+  EMSDK_VERSION: "6.0.13"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -57,11 +61,11 @@ jobs:
           node --check main.js
           grep -q 'os/wasm-rtos.js' index.html
 
-      - name: Install latest Emscripten SDK
+      - name: Install pinned Emscripten SDK
         run: |
-          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk" >/dev/null
-          "$RUNNER_TEMP/emsdk/emsdk" install latest >"$RUNNER_TEMP/emsdk-install.log"
-          "$RUNNER_TEMP/emsdk/emsdk" activate latest >>"$RUNNER_TEMP/emsdk-install.log"
+          git clone --depth 1 --branch "$EMSDK_VERSION" https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk" >/dev/null
+          "$RUNNER_TEMP/emsdk/emsdk" install "$EMSDK_VERSION" >"$RUNNER_TEMP/emsdk-install.log"
+          "$RUNNER_TEMP/emsdk/emsdk" activate "$EMSDK_VERSION" >>"$RUNNER_TEMP/emsdk-install.log"
           source "$RUNNER_TEMP/emsdk/emsdk_env.sh" >/dev/null
           emcc --version
 
