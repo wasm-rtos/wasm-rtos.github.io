@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>wasm-rtos</title>
-  <meta name="description" content="A portable scheduler for WebAssembly tasks in browsers, ESP32, and native hardware.">
-  <meta name="theme-color" content="#111111">
+  <meta name="description" content="A virtual board running WebAssembly programs on the wasm-rtos kernel, the same way they run on microcontrollers.">
+  <meta name="theme-color" content="#2d2d2d">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
   <link rel="icon" type="image/png" sizes="48x48" href="favicon-48x48.png">
@@ -16,163 +16,176 @@
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="page-drop.css">
   <script src="os/wasm-rtos.js" defer></script>
+  <script src="workspace.js" defer></script>
   <script src="main.js" defer></script>
 </head>
 <body>
-  <header class="top-header">
-    <a class="brand" href="#" aria-label="WA OS home">
-      <img src="wa-os-logo-horizontal.svg" alt="WA OS">
-    </a>
-    <nav class="site-nav" aria-label="Primary navigation">
-      <a href="#runtime">Live Runtime</a>
-      <a href="https://github.com/wasm-rtos/wasm-rtos" target="_blank" rel="noreferrer">GitHub ↗</a>
-    </nav>
-  </header>
+  <div class="app" id="app">
+    <header class="toolbar" aria-label="Toolbar">
+      <div class="toolbar-group">
+        <a class="brand" href="https://github.com/wasm-rtos" target="_blank" rel="noreferrer" aria-label="wasm-rtos on GitHub">
+          <img src="favicon.svg" alt="" width="20" height="20">
+          <span>wasm-rtos</span>
+        </a>
+        <div class="segmented" role="group" aria-label="Panels">
+          <button id="toggleLibrary" class="tool-button is-on" type="button" aria-pressed="true" title="Library (L)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M7.5 3.5v13"/></svg>
+            <span class="visually-hidden">Library</span>
+          </button>
+          <button id="toggleInspector" class="tool-button is-on" type="button" aria-pressed="true" title="Inspector (I)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M12.5 3.5v13"/></svg>
+            <span class="visually-hidden">Inspector</span>
+          </button>
+          <button id="toggleEditor" class="tool-button is-on" type="button" aria-pressed="true" title="Editors (E)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M2.5 11.5h15"/></svg>
+            <span class="visually-hidden">Editors</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="toolbar-group toolbar-center">
+        <div class="transport" role="group" aria-label="Execution">
+          <button id="runButton" class="tool-button transport-button" type="button" aria-pressed="true" title="Run / pause execution (Space)">
+            <svg class="icon-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5v11l9-5.5z"/></svg>
+            <svg class="icon-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h3v11H6zM11 4.5h3v11h-3z"/></svg>
+            <span class="visually-hidden">Run or pause execution</span>
+          </button>
+          <button id="loadButton" class="tool-button transport-button" type="button" title="Load .wasm program (O)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13.5V4M6 8l4-4 4 4M4 13v3h12v-3"/></svg>
+            <span class="visually-hidden">Load .wasm program</span>
+          </button>
+        </div>
+
+        <div class="lcd" role="group" aria-label="Runtime display">
+          <div class="lcd-cell lcd-time">
+            <strong id="lcdClock">00:00:00</strong>
+            <span>UPTIME</span>
+          </div>
+          <div class="lcd-cell">
+            <strong id="lcdTasks">0</strong>
+            <span>TASKS</span>
+          </div>
+          <div class="lcd-cell">
+            <strong id="lcdReady">0/0</strong>
+            <span>READY</span>
+          </div>
+          <div class="lcd-cell lcd-wide">
+            <strong id="lcdFuel">2.40</strong>
+            <span id="lcdFuelUnit">MFUEL/S</span>
+          </div>
+          <div class="lcd-cell lcd-state">
+            <strong id="lcdState">LOAD</strong>
+            <span>STATE</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="toolbar-group toolbar-right">
+        <a class="tool-link" href="https://github.com/wasm-rtos/wasm-rtos" target="_blank" rel="noreferrer">Source ↗</a>
+      </div>
+    </header>
+
+    <aside id="libraryPanel" class="panel library" aria-label="Library">
+      <div class="panel-header">
+        <h2>Library</h2>
+      </div>
+      <div class="library-search">
+        <input id="librarySearch" type="search" placeholder="Search parts" aria-label="Search parts" autocomplete="off">
+      </div>
+      <div id="libraryList" class="library-list"></div>
+      <p class="panel-footnote">Parts marked <em>planned</em> are not wired to the kernel yet.</p>
+    </aside>
+
+    <main class="workspace" id="workspace" aria-label="Board">
+      <canvas id="gridCanvas" class="grid-canvas" aria-hidden="true"></canvas>
+      <div id="boardLayer" class="board-layer"></div>
+      <div class="workspace-hud" aria-label="View controls">
+        <button id="zoomOut" class="hud-button" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
+        <button id="zoomReset" class="hud-button hud-zoom" type="button" title="Reset zoom (0)" aria-label="Reset zoom">100%</button>
+        <button id="zoomIn" class="hud-button" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
+        <button id="zoomFit" class="hud-button" type="button" title="Fit board (F)" aria-label="Fit board">Fit</button>
+      </div>
+      <div class="workspace-hint" id="workspaceHint">Drag to pan · ⌘/Ctrl + scroll to zoom · drop a .wasm file to run it</div>
+    </main>
+
+    <aside id="inspectorPanel" class="panel inspector" aria-label="Inspector">
+      <div class="panel-header">
+        <h2>Inspector</h2>
+      </div>
+      <div id="inspectorBody" class="inspector-body">
+        <details class="section" open>
+          <summary>Processor</summary>
+          <dl class="props">
+            <dt>Kernel</dt><dd>wasm-rtos</dd>
+            <dt>Engine</dt><dd>wasm3 interpreter</dd>
+            <dt>Status</dt><dd id="runtimeStatus">Loading</dd>
+            <dt>Host heap</dt><dd id="memoryValue">0 MB</dd>
+            <dt>Waiting</dt><dd id="waitingCount">0</dd>
+            <dt>Timers</dt><dd id="timerCount">0</dd>
+          </dl>
+          <p id="runtimeStatusDetail" class="props-note">Initializing wasm-rtos</p>
+        </details>
+
+        <details class="section" open>
+          <summary>Execution budget</summary>
+          <div class="fuel">
+            <div class="fuel-row">
+              <label for="fuelRateInput">Fuel / ms</label>
+              <input id="fuelRateInput" class="number-input" type="number" min="0" max="40000" step="1" value="2400" inputmode="numeric">
+            </div>
+            <input id="fuelRateSlider" class="slider" type="range" min="0" max="40000" step="1" value="2400" aria-label="Fuel rate">
+            <output id="fuelRateActual" class="props-note" for="fuelRateSlider fuelRateInput">0 fuel/ms scheduled</output>
+            <p class="props-note">Fuel is the interpreter work budget, not hardware MHz. At 0 the clock keeps running and tasks are paused.</p>
+          </div>
+        </details>
+
+        <details class="section" open>
+          <summary>Tasks <span id="activeBadge" class="count">0</span></summary>
+          <div id="taskList" class="task-list" aria-live="polite"></div>
+          <button id="newTaskButton" class="button button-wide" type="button">Load .wasm…</button>
+        </details>
+      </div>
+    </aside>
+
+    <section id="editorPanel" class="editor" aria-label="Editors">
+      <div id="editorResize" class="editor-resize" role="separator" aria-orientation="horizontal" aria-label="Resize editors" tabindex="0"></div>
+      <div class="editor-tabs" role="tablist" aria-label="Editor">
+        <button class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="timelinePane" id="timelineTab">Timeline</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="consolePane" id="consoleTab">Console</button>
+        <div class="editor-tabs-meta">
+          <span id="schedulerTimelineStatus" class="timeline-live"><i aria-hidden="true"></i> Live</span>
+          <span id="schedulerTimelineWindow">10 s window</span>
+        </div>
+      </div>
+      <div id="timelinePane" class="editor-pane" role="tabpanel" aria-labelledby="timelineTab">
+        <div id="schedulerTimelineShell" class="scheduler-timeline-shell">
+          <canvas id="schedulerTimelineCanvas" class="scheduler-timeline-canvas" aria-label="Live scheduler timeline. Launch a task to start tracing execution."></canvas>
+          <div id="schedulerTimelineEmpty" class="scheduler-timeline-empty">
+            <strong>No task slices yet</strong>
+            <span>Load a .wasm program to see scheduler activity.</span>
+          </div>
+          <div id="schedulerTimelineTooltip" class="scheduler-timeline-tooltip" role="tooltip" hidden></div>
+        </div>
+        <p id="schedulerTimelineSummary" class="visually-hidden" aria-live="polite">No scheduler activity recorded.</p>
+      </div>
+      <div id="consolePane" class="editor-pane" role="tabpanel" aria-labelledby="consoleTab" hidden>
+        <pre id="consoleLog" class="terminal" aria-live="polite"></pre>
+      </div>
+    </section>
+  </div>
+
+  <input id="wasmFile" class="visually-hidden" type="file" accept=".wasm" multiple aria-label="Choose .wasm file">
 
   <div id="pageDropOverlay" class="page-drop-overlay" role="status" aria-live="polite" aria-hidden="true">
     <div class="page-drop-overlay-card">
-      <span class="page-drop-overlay-label">WASM task</span>
+      <span class="page-drop-overlay-label">WASM program</span>
       <svg class="page-drop-overlay-icon" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
         <path d="M32 45V15M20 27L32 15L44 27" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
         <path d="M14 42V51H50V42" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <strong>Drop to launch</strong>
+      <strong>Drop to run</strong>
       <span>Release anywhere · .wasm files only</span>
     </div>
   </div>
-
-  <main id="runtime" class="dashboard" aria-label="wasm-rtos task dashboard">
-    <div class="content-row">
-      <section class="left-pane" aria-label="Task controls">
-        <div class="hero-upload-row">
-          <section class="hero" aria-labelledby="hero-title">
-            <p class="eyebrow">wasm-rtos · portable RTOS core</p>
-            <h1 id="hero-title">Run WebAssembly tasks everywhere.</h1>
-            <p>One FreeRTOS-style task model for browsers, ESP32, and native hardware. Try the live runtime here, then run the same WebAssembly workloads on your target.</p>
-            <div class="hero-links">
-              <a class="primary-link" href="https://github.com/wasm-rtos/wasm-rtos" target="_blank" rel="noreferrer">View source ↗</a>
-            </div>
-          </section>
-
-          <section class="card upload-card" aria-labelledby="upload-title">
-            <input id="wasmFile" class="file-input" type="file" accept=".wasm" aria-label="Choose WASM file">
-            <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-describedby="upload-help">
-              <div class="cloud-icon" aria-hidden="true">
-                <svg viewBox="0 0 64 48" focusable="false">
-                  <path d="M20 38H47C55 38 60 33 60 26C60 19 55 14 48 14C45 6 38 2 30 4C23 5 18 10 16 17C9 18 4 23 4 30C4 35 9 38 20 38Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M32 32V17M24 25L32 17L40 25" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </div>
-              <h2 id="upload-title">Drop WASM anywhere</h2>
-              <p id="upload-help">or choose a .wasm file</p>
-              <button id="launchButton" class="primary-button" type="button">Launch Task</button>
-            </div>
-          </section>
-        </div>
-
-        <section class="card tasks-card" aria-labelledby="tasks-title">
-          <div class="card-header">
-            <div class="title-group">
-              <h2 id="tasks-title">Tasks</h2>
-              <span id="activeBadge" class="pill">0 Tasks</span>
-            </div>
-            <button id="newTaskButton" class="secondary-button" type="button">+ New Task</button>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>APP NAME</th>
-                  <th>TASK ID</th>
-                  <th>STATUS</th>
-                  <th>ACTIVITY</th>
-                  <th>PRIORITY</th>
-                  <th>ACTIONS</th>
-                </tr>
-              </thead>
-              <tbody id="taskBody"></tbody>
-            </table>
-          </div>
-          <section class="scheduler-timeline" aria-labelledby="scheduler-timeline-title">
-            <div class="scheduler-timeline-header">
-              <div>
-                <h3 id="scheduler-timeline-title">Scheduler timeline</h3>
-                <p>LOW = idle · HIGH = running · measured slice duration</p>
-              </div>
-              <div class="scheduler-timeline-meta" aria-label="Timeline status">
-                <span id="schedulerTimelineStatus" class="timeline-live"><i aria-hidden="true"></i> Live</span>
-                <span id="schedulerTimelineWindow">10 s window</span>
-              </div>
-            </div>
-            <div id="schedulerTimelineShell" class="scheduler-timeline-shell">
-              <canvas id="schedulerTimelineCanvas" class="scheduler-timeline-canvas" aria-label="Live scheduler timeline. Launch a task to start tracing execution."></canvas>
-              <div id="schedulerTimelineEmpty" class="scheduler-timeline-empty">
-                <strong>No task slices yet</strong>
-                <span>Launch a WASM task to see scheduler activity.</span>
-              </div>
-              <div id="schedulerTimelineTooltip" class="scheduler-timeline-tooltip" role="tooltip" hidden></div>
-            </div>
-            <p id="schedulerTimelineSummary" class="visually-hidden" aria-live="polite">No scheduler activity recorded.</p>
-          </section>
-        </section>
-      </section>
-
-      <aside class="right-pane" aria-label="Runtime output">
-        <section class="card console-card" aria-labelledby="console-title">
-          <div class="card-header">
-            <h2 id="console-title">Console</h2>
-            <button class="link-button" type="button">Open Terminal ↗</button>
-          </div>
-          <pre id="consoleLog" class="terminal" aria-live="polite"></pre>
-        </section>
-
-        <section class="card preview-card" aria-labelledby="preview-title">
-          <div class="card-header">
-            <h2 id="preview-title">Preview Output</h2>
-            <span class="app-label">wasm-rtos <span aria-hidden="true">●</span></span>
-          </div>
-          <div class="canvas-shell">
-            <canvas id="previewCanvas" aria-label="Animated WebAssembly preview output"></canvas>
-          </div>
-        </section>
-      </aside>
-    </div>
-
-    <section class="card fuel-control" aria-labelledby="fuel-control-title">
-      <div class="fuel-control-copy">
-        <p class="eyebrow">Virtual CPU limiter</p>
-        <h2 id="fuel-control-title">WASM execution budget</h2>
-        <p>Limit how much wasm3 work may be scheduled per millisecond. The RTOS clock keeps advancing at zero fuel, so timers and deadlines remain meaningful while task execution is paused.</p>
-      </div>
-      <div class="fuel-control-panel">
-        <div class="fuel-rate-heading">
-          <div>
-            <strong id="fuelRateFrequency">2.40 Mfuel/s</strong>
-            <span id="fuelRatePerMs">2,400 fuel/ms budget</span>
-          </div>
-          <output id="fuelRateActual" for="fuelRateSlider fuelRateInput">0 fuel/ms scheduled</output>
-        </div>
-        <label class="fuel-slider-label" for="fuelRateSlider">Fuel rate</label>
-        <input id="fuelRateSlider" class="fuel-slider" type="range" min="0" max="40000" step="1" value="2400">
-        <div class="fuel-input-row">
-          <label for="fuelRateInput">Fuel / ms</label>
-          <input id="fuelRateInput" class="fuel-number-input" type="number" min="0" max="40000" step="1" value="2400" inputmode="numeric">
-          <span>0 pauses tasks</span>
-        </div>
-        <p class="fuel-calibration-note">Mfuel/s is a wasm3 fuel budget, not hardware MHz. An ESP32 MHz equivalent needs a benchmark-derived calibration profile.</p>
-      </div>
-    </section>
-
-    <section class="card stats-bar" aria-label="Runtime statistics">
-      <div class="stat cpu-stat"><div class="cpu-meter"><span>CPU</span><strong id="cpuValue">0%</strong><div class="progress"><i id="cpuProgress" style="width:0%"></i></div></div></div>
-      <div class="stat"><span>MEMORY</span><strong id="memoryValue">0 MB</strong><div class="progress"><i id="memoryProgress" style="width:0%"></i></div></div>
-      <div class="stat"><span>READY</span><strong><b id="activeRatio">0 / 0</b></strong><div class="progress"><i id="activeProgress" style="width:0%"></i></div></div>
-      <div class="stat"><span>WAITING</span><strong id="waitingCount">0</strong><div class="progress"><i id="waitingProgress" style="width:0%"></i></div></div>
-      <div class="stat"><span>TIMERS</span><strong id="timerCount">0</strong><div class="progress"><i id="timerProgress" style="width:0%"></i></div></div>
-      <div class="stat"><span>RUNTIME</span><strong id="runtimeClock">00:00:00</strong></div>
-      <div class="runtime-ok"><span class="status-dot"></span><div><strong id="runtimeStatus">Runtime: Loading</strong><small id="runtimeStatusDetail">Initializing wasm-rtos</small></div></div>
-    </section>
-
-  </main>
 </body>
 </html>

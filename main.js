@@ -1,8 +1,10 @@
 const tasks = [];
 let runtime = null;
 let runtimeStartedAt = 0;
+let runtimeFailed = false;
 let fuelPerSlice = 10000;
 let fuelRatePerMs = 2400;
+let resumeFuelRatePerMs = 2400;
 let previousScheduledSlices = 0;
 let previousFuelSampleAt = 0;
 let traceRuntimeSupported = false;
@@ -24,11 +26,11 @@ const TRACE_MIN_VISIBLE_SLICES = 4;
 const TRACE_VISIBLE_SLICES_PER_TASK = 2;
 const TRACE_BATCH_SIZE = 256;
 const TRACE_MAX_EVENTS = 4096;
-const TRACE_HEADER_HEIGHT = 44;
-const TRACE_ROW_HEIGHT = 54;
-const TRACE_FOOTER_HEIGHT = 10;
-const TRACE_MIN_PULSE_WIDTH = 5;
-const TRACE_COLORS = ['#71e7b3', '#8bb8ff', '#d39cff', '#ffbd69', '#ff8585', '#69d2e7'];
+const TRACE_HEADER_HEIGHT = 30;
+const TRACE_ROW_HEIGHT = 44;
+const TRACE_FOOTER_HEIGHT = 8;
+const TRACE_MIN_PULSE_WIDTH = 4;
+const TRACE_COLORS = ['#97dba0', '#9fbddf', '#d39cff', '#ffbd69', '#ff8585', '#69d2e7'];
 
 const traceEvents = [];
 const traceTaskOwners = new Map();
@@ -48,6 +50,7 @@ const OS_TASK_EXIT_DELETED = 3;
 const OS_TASK_EXIT_WASM_ERROR = 4;
 
 const UINT32_MAX = 0xFFFFFFFF;
+const CPU_NODE_ID = 'cpu';
 
 const statusIcons = {
   Running: '▶',
@@ -60,32 +63,46 @@ const statusIcons = {
   Stopped: '■'
 };
 
-const taskBody = document.querySelector('#taskBody');
+// Parts catalogue. Only the processor is wired to the kernel today.
+const PARTS = [
+  { category: 'Processor', id: CPU_NODE_ID, name: 'WASM CPU', meta: 'wasm-rtos · wasm3', icon: 'CPU', available: true },
+  { category: 'Displays', id: 'gc9a01', name: 'GC9A01', meta: 'Round TFT 240×240 · SPI', icon: 'TFT' },
+  { category: 'Displays', id: 'ssd1306', name: 'SSD1306', meta: 'OLED 128×64 · I²C', icon: 'OLD' },
+  { category: 'Sensors', id: 'bme280', name: 'BME280', meta: 'Temperature, humidity, pressure · I²C', icon: 'ENV' },
+  { category: 'Sensors', id: 'mpu6050', name: 'MPU6050', meta: '6-axis IMU · I²C', icon: 'IMU' },
+  { category: 'Input', id: 'button', name: 'Push button', meta: 'GPIO', icon: 'BTN' },
+  { category: 'Input', id: 'potentiometer', name: 'Potentiometer', meta: 'Analog', icon: 'POT' },
+  { category: 'Output', id: 'led', name: 'LED', meta: 'GPIO', icon: 'LED' },
+  { category: 'Output', id: 'neopixel', name: 'RGB LED strip', meta: 'Addressable · GPIO', icon: 'RGB' }
+];
+
+const app = document.querySelector('#app');
+const taskList = document.querySelector('#taskList');
 const activeBadge = document.querySelector('#activeBadge');
-const activeRatio = document.querySelector('#activeRatio');
-const activeProgress = document.querySelector('#activeProgress');
 const waitingCount = document.querySelector('#waitingCount');
-const waitingProgress = document.querySelector('#waitingProgress');
 const timerCount = document.querySelector('#timerCount');
-const timerProgress = document.querySelector('#timerProgress');
 const consoleLog = document.querySelector('#consoleLog');
-const runtimeClock = document.querySelector('#runtimeClock');
 const runtimeStatus = document.querySelector('#runtimeStatus');
 const runtimeStatusDetail = document.querySelector('#runtimeStatusDetail');
 const memoryValue = document.querySelector('#memoryValue');
-const memoryProgress = document.querySelector('#memoryProgress');
-const cpuValue = document.querySelector('#cpuValue');
-const cpuProgress = document.querySelector('#cpuProgress');
 const fileInput = document.querySelector('#wasmFile');
-const dropZone = document.querySelector('#dropZone');
 const pageDropOverlay = document.querySelector('#pageDropOverlay');
-const launchButton = document.querySelector('#launchButton');
+const loadButton = document.querySelector('#loadButton');
+const runButton = document.querySelector('#runButton');
 const newTaskButton = document.querySelector('#newTaskButton');
 const fuelRateSlider = document.querySelector('#fuelRateSlider');
 const fuelRateInput = document.querySelector('#fuelRateInput');
-const fuelRateFrequency = document.querySelector('#fuelRateFrequency');
-const fuelRatePerMsLabel = document.querySelector('#fuelRatePerMs');
 const fuelRateActual = document.querySelector('#fuelRateActual');
+const lcdClock = document.querySelector('#lcdClock');
+const lcdTasks = document.querySelector('#lcdTasks');
+const lcdReady = document.querySelector('#lcdReady');
+const lcdFuel = document.querySelector('#lcdFuel');
+const lcdFuelUnit = document.querySelector('#lcdFuelUnit');
+const lcdState = document.querySelector('#lcdState');
+const libraryList = document.querySelector('#libraryList');
+const librarySearch = document.querySelector('#librarySearch');
+const editorPanel = document.querySelector('#editorPanel');
+const editorResize = document.querySelector('#editorResize');
 const schedulerTimelineCanvas = document.querySelector('#schedulerTimelineCanvas');
 const schedulerTimelineShell = document.querySelector('#schedulerTimelineShell');
 const schedulerTimelineEmpty = document.querySelector('#schedulerTimelineEmpty');
@@ -97,6 +114,8 @@ const schedulerTimelineContext = schedulerTimelineCanvas.getContext('2d');
 
 const fuelNumberFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const integerNumberFormat = new Intl.NumberFormat('en-US');
+
+const cpuView = {};
 
 function timeStamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -128,35 +147,43 @@ function callRuntime(name, returnType, argumentTypes = [], argumentsList = []) {
   return runtime.ccall(name, returnType, argumentTypes, argumentsList);
 }
 
+/* ---------- Execution budget ---------- */
+
 function clampFuelRate(value) {
   if (!Number.isFinite(value)) return fuelRatePerMs;
   return Math.min(40000, Math.max(0, Math.round(value)));
 }
 
-function renderFuelRate() {
+function formatFuelRate() {
   const megaFuelPerSecond = fuelRatePerMs / 1000;
   const fractionDigits = megaFuelPerSecond < 0.1 ? 3 : megaFuelPerSecond < 10 ? 2 : 1;
-  fuelRateFrequency.textContent = fuelRatePerMs === 0
-    ? 'Paused'
-    : `${megaFuelPerSecond.toFixed(fractionDigits)} Mfuel/s`;
-  fuelRatePerMsLabel.textContent = `${fuelNumberFormat.format(fuelRatePerMs)} fuel/ms budget`;
+  return megaFuelPerSecond.toFixed(fractionDigits);
+}
+
+function renderFuelRate() {
+  lcdFuel.textContent = fuelRatePerMs === 0 ? '0' : formatFuelRate();
+  lcdFuelUnit.textContent = 'MFUEL/S';
+  cpuView.fuel.textContent = fuelRatePerMs === 0 ? '0' : formatFuelRate();
+  runButton.setAttribute('aria-pressed', String(fuelRatePerMs > 0));
+  renderRunState();
 }
 
 function setFuelRate(value, updateInput = true) {
   fuelRatePerMs = clampFuelRate(Number(value));
+  if (fuelRatePerMs > 0) resumeFuelRatePerMs = fuelRatePerMs;
   fuelRateSlider.value = String(fuelRatePerMs);
   if (updateInput) fuelRateInput.value = String(fuelRatePerMs);
   renderFuelRate();
 
   if (runtime) {
-    callRuntime(
-      'browser_runtime_set_fuel_per_ms',
-      null,
-      ['number'],
-      [fuelRatePerMs]
-    );
+    callRuntime('browser_runtime_set_fuel_per_ms', null, ['number'], [fuelRatePerMs]);
     resetFuelTelemetry();
   }
+}
+
+function toggleRun() {
+  setFuelRate(fuelRatePerMs > 0 ? 0 : resumeFuelRatePerMs || 2400);
+  appendLog(fuelRatePerMs > 0 ? 'Execution resumed' : 'Execution paused (fuel 0)');
 }
 
 function resetFuelTelemetry() {
@@ -174,10 +201,7 @@ function updateFuelTelemetry() {
   const elapsedMs = now - previousFuelSampleAt;
   if (elapsedMs < FUEL_TELEMETRY_WINDOW_MS) return;
 
-  const scheduledSlices = callRuntime(
-    'browser_runtime_get_scheduled_slice_count',
-    'number'
-  ) >>> 0;
+  const scheduledSlices = callRuntime('browser_runtime_get_scheduled_slice_count', 'number') >>> 0;
   const sliceDelta = (scheduledSlices - previousScheduledSlices) >>> 0;
   const scheduledFuelPerMs = sliceDelta * fuelPerSlice / elapsedMs;
 
@@ -185,6 +209,18 @@ function updateFuelTelemetry() {
   previousScheduledSlices = scheduledSlices;
   previousFuelSampleAt = now;
 }
+
+function renderRunState() {
+  const mode = runtimeFailed ? 'error' : !runtime ? 'load' : fuelRatePerMs === 0 ? 'pause' : 'run';
+  const label = { error: 'ERR', load: 'LOAD', pause: 'PAUSE', run: 'RUN' }[mode];
+  lcdState.textContent = label;
+  lcdState.parentElement.classList.toggle('is-run', mode === 'run');
+  lcdState.parentElement.classList.toggle('is-pause', mode === 'pause');
+  lcdState.parentElement.classList.toggle('is-error', mode === 'error');
+  cpuView.led.className = `chip-led is-${mode}`;
+}
+
+/* ---------- Scheduler trace ---------- */
 
 function freeTraceBuffers() {
   if (!runtime) return;
@@ -284,13 +320,7 @@ function consumeTraceEvents() {
       'browser_trace_read',
       'number',
       ['number', 'number', 'number', 'number', 'number'],
-      [
-        firstSequence,
-        requestedCount,
-        traceTaskIdsPointer,
-        traceStartsPointer,
-        traceDurationsPointer
-      ]
+      [firstSequence, requestedCount, traceTaskIdsPointer, traceStartsPointer, traceDurationsPointer]
     ) >>> 0;
     const view = new DataView(runtime.HEAPU8.buffer);
 
@@ -335,7 +365,7 @@ function updateTimelineStatus() {
   const label = mode === 'live'
     ? 'Live'
     : mode === 'paused'
-      ? 'Fuel paused'
+      ? 'Paused'
       : mode === 'loading'
         ? 'Loading'
         : 'Trace unavailable';
@@ -401,7 +431,7 @@ function drawTraceSignalPath(context, pulses, trackLeft, trackRight, highY, lowY
 function resizeSchedulerTimeline() {
   const width = Math.max(1, schedulerTimelineShell.clientWidth);
   const height = Math.max(
-    154,
+    schedulerTimelineShell.parentElement.clientHeight,
     TRACE_HEADER_HEIGHT + Math.max(1, tasks.length) * TRACE_ROW_HEIGHT + TRACE_FOOTER_HEIGHT
   );
   const scale = Math.min(2, window.devicePixelRatio || 1);
@@ -442,13 +472,13 @@ function updateTimelineEmptyState(hasVisibleEvents) {
 
   if (!tasks.length) {
     heading.textContent = 'No task slices yet';
-    detail.textContent = 'Launch a WASM task to see scheduler activity.';
+    detail.textContent = 'Load a .wasm program to see scheduler activity.';
   } else if (!traceRuntimeSupported) {
     heading.textContent = 'Trace runtime unavailable';
     detail.textContent = 'Refresh after the browser runtime finishes updating.';
   } else if (fuelRatePerMs === 0) {
     heading.textContent = 'Execution is paused';
-    detail.textContent = 'Raise fuel above zero to schedule task slices.';
+    detail.textContent = 'Press Run or raise fuel above zero to schedule task slices.';
   } else {
     heading.textContent = 'Waiting for a scheduler slice';
     detail.textContent = 'The first execution segment will enter from the right.';
@@ -477,16 +507,20 @@ function updateTimelineAccessibility(totals, totalDuration, hasVisibleEvents) {
 }
 
 function drawSchedulerTimeline() {
+  requestAnimationFrame(drawSchedulerTimeline);
   updateTimelineStatus();
   updateTraceWindow();
   if (traceRuntimeSupported) consumeTraceEvents();
   else traceClockMs = runtimeStartedAt ? performance.now() - runtimeStartedAt : 0;
 
+  // Keep consuming trace events while hidden, but skip drawing.
+  if (schedulerTimelineShell.offsetParent === null) return;
+
   const { width, height } = resizeSchedulerTimeline();
   const context = schedulerTimelineContext;
-  const labelWidth = width < 560 ? 116 : Math.min(220, Math.max(170, width * 0.23));
+  const labelWidth = width < 560 ? 116 : Math.min(220, Math.max(170, width * 0.2));
   const trackLeft = labelWidth;
-  const trackRight = Math.max(trackLeft + 1, width - 16);
+  const trackRight = Math.max(trackLeft + 1, width - 12);
   const trackWidth = Math.max(1, trackRight - trackLeft);
   const windowStart = traceClockMs - traceWindowMs;
   const taskIds = new Set(tasks.map((task) => task.localId));
@@ -500,32 +534,39 @@ function drawSchedulerTimeline() {
 
   traceHitRegions.length = 0;
   context.clearRect(0, 0, width, height);
-  context.fillStyle = '#151515';
+  context.fillStyle = '#2d2d2d';
   context.fillRect(0, 0, width, height);
-  context.fillStyle = '#181818';
+  context.fillStyle = '#313131';
   context.fillRect(0, 0, labelWidth, height);
+  context.fillStyle = '#313131';
+  context.fillRect(trackLeft, 0, width - trackLeft, TRACE_HEADER_HEIGHT);
 
   context.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-  context.fillStyle = '#747474';
+  context.fillStyle = '#808080';
   context.textBaseline = 'middle';
   context.textAlign = 'left';
-  context.fillText(width < 560 ? 'TASK / SHARE' : 'TASK / EXECUTION SHARE', 14, 16);
-  context.fillText('EXECUTION → NOW', trackLeft + 10, 16);
+  context.fillText(width < 560 ? 'TASK / SHARE' : 'TASK / EXECUTION SHARE', 10, TRACE_HEADER_HEIGHT / 2);
 
-  context.strokeStyle = 'rgba(255,255,255,.08)';
+  context.strokeStyle = '#3c3c3c';
   context.lineWidth = 1;
   for (let index = 0; index <= 5; index += 1) {
     const x = trackLeft + trackWidth * index / 5;
     context.beginPath();
-    context.moveTo(x + 0.5, TRACE_HEADER_HEIGHT);
-    context.lineTo(x + 0.5, height);
+    context.moveTo(Math.round(x) + 0.5, TRACE_HEADER_HEIGHT);
+    context.lineTo(Math.round(x) + 0.5, height);
     context.stroke();
 
     const secondsAgo = Math.round(traceWindowMs / 1000 * (1 - index / 5));
-    context.fillStyle = index === 5 ? '#bfc7c3' : '#676767';
+    context.fillStyle = index === 5 ? '#e7e7e7' : '#808080';
     context.textAlign = index === 0 ? 'left' : index === 5 ? 'right' : 'center';
-    context.fillText(index === 5 ? 'NOW' : `−${secondsAgo}s`, x, TRACE_HEADER_HEIGHT - 8);
+    context.fillText(index === 5 ? 'NOW' : `−${secondsAgo}s`, index === 0 ? x + 6 : x - (index === 5 ? 4 : 0), TRACE_HEADER_HEIGHT / 2);
   }
+
+  context.strokeStyle = '#000000';
+  context.beginPath();
+  context.moveTo(0, TRACE_HEADER_HEIGHT - 0.5);
+  context.lineTo(width, TRACE_HEADER_HEIGHT - 0.5);
+  context.stroke();
 
   tasks.forEach((task, taskIndex) => {
     const rowTop = TRACE_HEADER_HEIGHT + taskIndex * TRACE_ROW_HEIGHT;
@@ -535,7 +576,7 @@ function drawSchedulerTimeline() {
 
     context.fillStyle = taskIndex % 2 ? 'rgba(255,255,255,.012)' : 'rgba(255,255,255,.025)';
     context.fillRect(0, rowTop, width, TRACE_ROW_HEIGHT);
-    context.strokeStyle = 'rgba(255,255,255,.07)';
+    context.strokeStyle = '#262626';
     context.beginPath();
     context.moveTo(0, rowTop + TRACE_ROW_HEIGHT - 0.5);
     context.lineTo(width, rowTop + TRACE_ROW_HEIGHT - 0.5);
@@ -543,26 +584,18 @@ function drawSchedulerTimeline() {
 
     context.fillStyle = task.traceColor;
     context.beginPath();
-    context.arc(14, rowCenter - 8, 3.5, 0, Math.PI * 2);
+    context.arc(14, rowCenter - 7, 3.5, 0, Math.PI * 2);
     context.fill();
 
     context.font = '600 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    context.fillStyle = '#e5e5e5';
+    context.fillStyle = '#e7e7e7';
     context.textAlign = 'left';
-    context.fillText(
-      truncateCanvasText(context, task.app, labelWidth - 34),
-      24,
-      rowCenter - 8
-    );
+    context.fillText(truncateCanvasText(context, task.app, labelWidth - 34), 24, rowCenter - 7);
 
     context.font = '9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-    context.fillStyle = '#777';
+    context.fillStyle = '#808080';
     const taskDetail = `${task.id} · ${share.toFixed(0)}% · ${formatTraceDuration(taskDuration)}`;
-    context.fillText(
-      truncateCanvasText(context, taskDetail, labelWidth - 24),
-      24,
-      rowCenter + 10
-    );
+    context.fillText(truncateCanvasText(context, taskDetail, labelWidth - 24), 24, rowCenter + 9);
   });
 
   context.save();
@@ -579,22 +612,18 @@ function drawSchedulerTimeline() {
     const task = tasks[taskIndex];
     const rowTop = TRACE_HEADER_HEIGHT + taskIndex * TRACE_ROW_HEIGHT;
     const eventStart = Math.max(windowStart, traceEvent.startedAtMs);
-    const eventEnd = Math.min(
-      traceClockMs,
-      traceEvent.startedAtMs + Math.max(traceEvent.durationMs, 0.001)
-    );
+    const eventEnd = Math.min(traceClockMs, traceEvent.startedAtMs + Math.max(traceEvent.durationMs, 0.001));
     const x = trackLeft + (eventStart - windowStart) / traceWindowMs * trackWidth;
     const proportionalWidth = (eventEnd - eventStart) / traceWindowMs * trackWidth;
     const pulseWidth = Math.max(TRACE_MIN_PULSE_WIDTH, proportionalWidth);
     const pulseEndX = Math.min(trackRight, x + pulseWidth);
-    const highY = rowTop + 13;
-    const lowY = rowTop + TRACE_ROW_HEIGHT - 13;
-    const startsBeforeWindow = traceEvent.startedAtMs < windowStart;
+    const highY = rowTop + 11;
+    const lowY = rowTop + TRACE_ROW_HEIGHT - 11;
 
     signalPulses.get(task.localId).push({
       startX: x,
       endX: pulseEndX,
-      startsBeforeWindow
+      startsBeforeWindow: traceEvent.startedAtMs < windowStart
     });
 
     traceHitRegions.push({
@@ -609,14 +638,12 @@ function drawSchedulerTimeline() {
 
   tasks.forEach((task, taskIndex) => {
     const rowTop = TRACE_HEADER_HEIGHT + taskIndex * TRACE_ROW_HEIGHT;
-    const highY = rowTop + 13;
-    const lowY = rowTop + TRACE_ROW_HEIGHT - 13;
+    const highY = rowTop + 11;
+    const lowY = rowTop + TRACE_ROW_HEIGHT - 11;
     const pulses = mergeTracePulses(signalPulses.get(task.localId));
 
     context.save();
-    context.globalAlpha = 0.18;
-    context.shadowColor = task.traceColor;
-    context.shadowBlur = 8;
+    context.globalAlpha = 0.16;
     context.strokeStyle = task.traceColor;
     context.lineWidth = 5;
     context.lineJoin = 'miter';
@@ -626,7 +653,7 @@ function drawSchedulerTimeline() {
     context.restore();
 
     context.strokeStyle = task.traceColor;
-    context.lineWidth = 2;
+    context.lineWidth = 1.5;
     context.lineJoin = 'miter';
     context.lineCap = 'square';
     drawTraceSignalPath(context, pulses, trackLeft, trackRight, highY, lowY);
@@ -634,18 +661,14 @@ function drawSchedulerTimeline() {
   });
   context.restore();
 
-  const fade = context.createLinearGradient(trackLeft, 0, trackLeft + 34, 0);
-  fade.addColorStop(0, '#151515');
-  fade.addColorStop(1, 'rgba(21,21,21,0)');
-  context.fillStyle = fade;
-  context.fillRect(trackLeft, TRACE_HEADER_HEIGHT, 34, height - TRACE_HEADER_HEIGHT);
-
-  context.strokeStyle = 'rgba(255,255,255,.16)';
+  context.strokeStyle = '#000000';
   context.beginPath();
-  context.moveTo(trackLeft + 0.5, 0);
-  context.lineTo(trackLeft + 0.5, height);
+  context.moveTo(trackLeft - 0.5, 0);
+  context.lineTo(trackLeft - 0.5, height);
   context.stroke();
-  context.strokeStyle = '#71e7b3';
+
+  // Playhead
+  context.strokeStyle = '#e7e7e7';
   context.beginPath();
   context.moveTo(trackRight + 0.5, TRACE_HEADER_HEIGHT);
   context.lineTo(trackRight + 0.5, height);
@@ -653,7 +676,6 @@ function drawSchedulerTimeline() {
 
   updateTimelineEmptyState(visibleEvents.length > 0);
   updateTimelineAccessibility(totals, totalDuration, visibleEvents.length > 0);
-  requestAnimationFrame(drawSchedulerTimeline);
 }
 
 function hideTimelineTooltip() {
@@ -681,25 +703,19 @@ function showTimelineTooltip(pointerEvent) {
   const age = document.createElement('span');
   title.textContent = hit.task.app;
   duration.textContent = `Slice #${hit.traceEvent.sequence} · ${formatTraceDuration(hit.traceEvent.durationMs)}`;
-  age.textContent = formatTraceAge(
-    traceClockMs - hit.traceEvent.startedAtMs - hit.traceEvent.durationMs
-  );
+  age.textContent = formatTraceAge(traceClockMs - hit.traceEvent.startedAtMs - hit.traceEvent.durationMs);
   schedulerTimelineTooltip.replaceChildren(title, duration, document.createElement('br'), age);
   schedulerTimelineTooltip.hidden = false;
 
   const tooltipWidth = schedulerTimelineTooltip.offsetWidth;
   const tooltipHeight = schedulerTimelineTooltip.offsetHeight;
-  const left = Math.min(
-    schedulerTimelineShell.clientWidth - tooltipWidth - 8,
-    Math.max(8, x + 12)
-  );
-  const top = Math.min(
-    schedulerTimelineShell.clientHeight - tooltipHeight - 8,
-    Math.max(8, y - tooltipHeight - 10)
-  );
+  const left = Math.min(schedulerTimelineShell.clientWidth - tooltipWidth - 8, Math.max(8, x + 12));
+  const top = Math.min(schedulerTimelineShell.clientHeight - tooltipHeight - 8, Math.max(8, y - tooltipHeight - 10));
   schedulerTimelineTooltip.style.left = `${left}px`;
   schedulerTimelineTooltip.style.top = `${top}px`;
 }
+
+/* ---------- Tasks ---------- */
 
 async function detectEntryPoint(wasmBytes) {
   const module = await WebAssembly.compile(wasmBytes);
@@ -755,85 +771,21 @@ function createOsTask(task) {
   appendLog(`Started ${task.app} as ${task.id} using ${task.entryPoint}`);
 }
 
-function createTextCell(value) {
-  const cell = document.createElement('td');
-  cell.textContent = value;
-  return cell;
-}
-
-function createStatusCell(task) {
-  const cell = document.createElement('td');
-  const status = document.createElement('span');
-  const icon = document.createElement('span');
-
-  status.className = 'status';
-  icon.className = 'status-icon';
-  icon.setAttribute('aria-hidden', 'true');
-  icon.textContent = statusIcons[task.status] || '?';
-
-  status.append(icon, document.createTextNode(task.status));
-  cell.appendChild(status);
-  return cell;
-}
-
 function formatLastRun(lastRunAt, now) {
-  if (!lastRunAt) return 'Never';
+  if (!lastRunAt) return 'never';
 
   const elapsedSeconds = Math.max(0, Math.floor((now - lastRunAt) / 1000));
-  if (elapsedSeconds < 1) return 'Just now';
+  if (elapsedSeconds < 1) return 'just now';
   if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
 
   const elapsedMinutes = Math.floor(elapsedSeconds / 60);
   if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
 
-  const elapsedHours = Math.floor(elapsedMinutes / 60);
-  return `${elapsedHours}h ago`;
-}
-
-function createActivityCell(task, now) {
-  const cell = document.createElement('td');
-  const activity = document.createElement('span');
-  const indicator = document.createElement('span');
-  const count = document.createElement('strong');
-  const lastRun = document.createElement('small');
-  const runLabel = task.runCount === 1 ? 'run' : 'runs';
-  const lastRunLabel = formatLastRun(task.lastRunAt, now);
-
-  activity.className = 'task-activity';
-  indicator.className = 'task-activity-dot';
-  indicator.setAttribute('aria-hidden', 'true');
-  count.textContent = `${integerNumberFormat.format(task.runCount)} ${runLabel}`;
-  lastRun.textContent = lastRunLabel;
-  activity.setAttribute(
-    'aria-label',
-    `${integerNumberFormat.format(task.runCount)} ${runLabel}. Last run: ${lastRunLabel}`
-  );
-
-  activity.append(indicator, count, lastRun);
-  cell.appendChild(activity);
-  return cell;
+  return `${Math.floor(elapsedMinutes / 60)}h ago`;
 }
 
 function canSetTaskPriority(task) {
   return Boolean(task.osTaskId) && !['Completed', 'Failed', 'Stopped'].includes(task.status);
-}
-
-function createPriorityCell(task) {
-  const cell = document.createElement('td');
-  const input = document.createElement('input');
-
-  input.className = 'priority-input';
-  input.type = 'number';
-  input.min = '0';
-  input.max = String(UINT32_MAX);
-  input.step = '1';
-  input.value = String(task.priority);
-  input.dataset.priorityTaskId = task.localId;
-  input.disabled = !canSetTaskPriority(task);
-  input.setAttribute('aria-label', `Priority for ${task.app}`);
-
-  cell.appendChild(input);
-  return cell;
 }
 
 function createActionButton(task, action, label, symbol) {
@@ -842,53 +794,82 @@ function createActionButton(task, action, label, symbol) {
   button.type = 'button';
   button.dataset.action = action;
   button.dataset.id = task.localId;
+  button.title = label;
   button.setAttribute('aria-label', `${label} ${task.app}`);
   button.textContent = symbol;
   return button;
 }
 
-function createActionsCell(task) {
-  const cell = document.createElement('td');
+function createTaskActions(task) {
   const actions = document.createElement('div');
   const canPause = task.osTaskId && ['Running', 'Ready', 'Waiting'].includes(task.status);
   const canResume = task.osTaskId && task.status === 'Paused';
   const canStop = Boolean(task.osTaskId) && !['Completed', 'Failed', 'Stopped'].includes(task.status);
 
   actions.className = 'actions';
-
-  if (canPause) {
-    actions.appendChild(createActionButton(task, 'pause', 'Pause', 'Ⅱ'));
-  } else if (canResume) {
-    actions.appendChild(createActionButton(task, 'resume', 'Resume', '▶'));
-  }
-
-  if (canStop) {
-    actions.appendChild(createActionButton(task, 'stop', 'Stop', '■'));
-  }
-
+  if (canPause) actions.appendChild(createActionButton(task, 'pause', 'Pause', 'Ⅱ'));
+  else if (canResume) actions.appendChild(createActionButton(task, 'resume', 'Resume', '▶'));
+  if (canStop) actions.appendChild(createActionButton(task, 'stop', 'Stop', '■'));
   actions.appendChild(createActionButton(task, 'restart', 'Restart', '↻'));
-  actions.appendChild(createActionButton(task, 'remove', 'Remove', '♲'));
-  cell.appendChild(actions);
-  return cell;
+  actions.appendChild(createActionButton(task, 'remove', 'Remove', '✕'));
+  return actions;
+}
+
+function createTaskRow(task, now) {
+  const row = document.createElement('div');
+  const dot = document.createElement('span');
+  const name = document.createElement('span');
+  const meta = document.createElement('div');
+  const status = document.createElement('span');
+  const runs = document.createElement('span');
+  const priority = document.createElement('label');
+  const priorityInput = document.createElement('input');
+  const runLabel = task.runCount === 1 ? 'run' : 'runs';
+
+  row.className = 'task';
+  if (task.activityUntil > now) row.classList.add('is-recently-active');
+
+  dot.className = 'task-dot';
+  dot.style.background = task.traceColor;
+  name.className = 'task-name';
+  name.textContent = task.app;
+  name.title = `${task.app} · ${task.id}`;
+
+  status.className = 'task-status';
+  status.dataset.status = task.status;
+  status.textContent = `${statusIcons[task.status] || '?'} ${task.status}`;
+
+  runs.textContent = `${integerNumberFormat.format(task.runCount)} ${runLabel} · ${formatLastRun(task.lastRunAt, now)}`;
+
+  priority.className = 'task-priority';
+  priority.textContent = 'prio';
+  priorityInput.className = 'number-input';
+  priorityInput.type = 'number';
+  priorityInput.min = '0';
+  priorityInput.max = String(UINT32_MAX);
+  priorityInput.step = '1';
+  priorityInput.value = String(task.priority);
+  priorityInput.dataset.priorityTaskId = task.localId;
+  priorityInput.disabled = !canSetTaskPriority(task);
+  priorityInput.setAttribute('aria-label', `Priority for ${task.app}`);
+  priority.appendChild(priorityInput);
+
+  meta.className = 'task-meta';
+  meta.append(status, runs, priority);
+  row.append(dot, name, createTaskActions(task), meta);
+  return row;
 }
 
 function renderTasks() {
-  taskBody.replaceChildren();
   const now = performance.now();
-  tasks.forEach((task) => {
-    const row = document.createElement('tr');
-    row.className = 'task-row';
-    if (task.activityUntil > now) row.classList.add('is-recently-active');
-    row.append(
-      createTextCell(task.app),
-      createTextCell(task.id),
-      createStatusCell(task),
-      createActivityCell(task, now),
-      createPriorityCell(task),
-      createActionsCell(task)
-    );
-    taskBody.appendChild(row);
-  });
+  if (!tasks.length) {
+    const empty = document.createElement('p');
+    empty.className = 'task-empty';
+    empty.textContent = 'No programs. Drop a .wasm file anywhere or use Load.';
+    taskList.replaceChildren(empty);
+  } else {
+    taskList.replaceChildren(...tasks.map((task) => createTaskRow(task, now)));
+  }
   updateCounters();
 }
 
@@ -909,23 +890,17 @@ function updateCounters() {
     }
   }
 
-  const active = ready + waiting;
-  activeBadge.textContent = `${tasks.length} ${tasks.length === 1 ? 'Task' : 'Tasks'}`;
-  activeRatio.textContent = `${ready} / ${total}`;
-  activeProgress.style.width = `${total ? (ready / total) * 100 : 0}%`;
-  waitingCount.textContent = waiting;
-  waitingProgress.style.width = `${total ? (waiting / total) * 100 : 0}%`;
-  timerCount.textContent = timers;
-  timerProgress.style.width = `${Math.min(100, timers * 25)}%`;
-
-  const cpu = Math.min(100, active * 12);
-  cpuValue.textContent = `${cpu}%`;
-  cpuProgress.style.width = `${cpu}%`;
+  activeBadge.textContent = String(tasks.length);
+  lcdTasks.textContent = String(total);
+  lcdReady.textContent = `${ready}/${total}`;
+  cpuView.tasks.textContent = String(total);
+  cpuView.ready.textContent = String(ready);
+  waitingCount.textContent = String(waiting);
+  timerCount.textContent = String(timers);
 
   if (runtime && runtime.HEAPU8) {
     const memoryMb = runtime.HEAPU8.buffer.byteLength / (1024 * 1024);
     memoryValue.textContent = `${memoryMb.toFixed(1)} MB`;
-    memoryProgress.style.width = `${Math.min(100, memoryMb / 2)}%`;
   }
 }
 
@@ -934,9 +909,7 @@ function findTask(localId) {
 }
 
 function parsePriority(value) {
-  if (value.trim() === '') {
-    throw new Error('Priority is required');
-  }
+  if (value.trim() === '') throw new Error('Priority is required');
 
   const priority = Number(value);
   if (!Number.isInteger(priority) || priority < 0 || priority > UINT32_MAX) {
@@ -952,21 +925,10 @@ function updateTaskPriority(task, input) {
     if (!task.osTaskId) throw new Error('Task is not available in the runtime');
 
     const nextPriority = parsePriority(input.value);
-    const status = callRuntime(
-      'browser_task_set_priority',
-      'number',
-      ['number', 'number'],
-      [task.osTaskId, nextPriority]
-    );
-
+    const status = callRuntime('browser_task_set_priority', 'number', ['number', 'number'], [task.osTaskId, nextPriority]);
     if (status !== OS_STATUS_OK) throw new Error(runtimeError());
 
-    task.priority = callRuntime(
-      'browser_task_get_priority',
-      'number',
-      ['number'],
-      [task.osTaskId]
-    );
+    task.priority = callRuntime('browser_task_get_priority', 'number', ['number'], [task.osTaskId]);
     appendLog(`${task.id}: priority changed from ${previousPriority} to ${task.priority}`);
   } catch (error) {
     task.priority = previousPriority;
@@ -1010,21 +972,21 @@ async function handleTaskAction(task, action) {
   renderTasks();
 }
 
-taskBody.addEventListener('click', (event) => {
+taskList.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-action]');
   if (!button) return;
   const task = findTask(button.dataset.id);
   if (task) handleTaskAction(task, button.dataset.action);
 });
 
-taskBody.addEventListener('change', (event) => {
+taskList.addEventListener('change', (event) => {
   const input = event.target.closest('input[data-priority-task-id]');
   if (!input) return;
   const task = findTask(input.dataset.priorityTaskId);
   if (task) updateTaskPriority(task, input);
 });
 
-taskBody.addEventListener('keydown', (event) => {
+taskList.addEventListener('keydown', (event) => {
   const input = event.target.closest('input[data-priority-task-id]');
   if (!input) return;
 
@@ -1038,6 +1000,8 @@ taskBody.addEventListener('keydown', (event) => {
     input.blur();
   }
 });
+
+/* ---------- Loading programs ---------- */
 
 function openPicker() {
   fileInput.click();
@@ -1101,48 +1065,250 @@ function resetPageFileDrag() {
   setPageDropActive(false);
 }
 
-function handlePageDragEnter(event) {
+document.addEventListener('dragenter', (event) => {
   if (!dragContainsFiles(event)) return;
   event.preventDefault();
   pageFileDragDepth += 1;
   setPageDropActive(true);
-}
+}, true);
 
-function handlePageDragOver(event) {
+document.addEventListener('dragover', (event) => {
   if (!dragContainsFiles(event)) return;
   event.preventDefault();
   event.dataTransfer.dropEffect = 'copy';
   setPageDropActive(true);
-}
+}, true);
 
-function handlePageDragLeave(event) {
+document.addEventListener('dragleave', (event) => {
   if (pageFileDragDepth === 0) return;
   event.preventDefault();
   pageFileDragDepth -= 1;
   if (pageFileDragDepth === 0) setPageDropActive(false);
-}
+}, true);
 
-function handlePageDrop(event) {
+document.addEventListener('drop', (event) => {
   if (!dragContainsFiles(event)) return;
   event.preventDefault();
   const files = event.dataTransfer.files;
   resetPageFileDrag();
   if (files.length > 0) handleFiles(files);
-}
+}, true);
 
-['click', 'keydown'].forEach((type) => {
-  dropZone.addEventListener(type, (event) => {
-    if (event.type === 'click' || event.key === 'Enter' || event.key === ' ') openPicker();
-  });
-});
-launchButton.addEventListener('click', (event) => { event.stopPropagation(); openPicker(); });
+document.addEventListener('dragend', resetPageFileDrag, true);
+
+loadButton.addEventListener('click', openPicker);
 newTaskButton.addEventListener('click', openPicker);
 fileInput.addEventListener('change', () => { handleFiles(fileInput.files); fileInput.value = ''; });
-document.addEventListener('dragenter', handlePageDragEnter, true);
-document.addEventListener('dragover', handlePageDragOver, true);
-document.addEventListener('dragleave', handlePageDragLeave, true);
-document.addEventListener('drop', handlePageDrop, true);
-document.addEventListener('dragend', resetPageFileDrag, true);
+
+/* ---------- Board, library, panels ---------- */
+
+function createCpuNode() {
+  Board.addNode({
+    id: CPU_NODE_ID,
+    x: -130,
+    y: -110,
+    width: 260,
+    height: 220,
+    pins: {
+      left: ['GPIO0', 'GPIO1', 'GPIO2', 'GPIO3', 'GPIO4', 'GPIO5', 'GPIO6', 'GPIO7'],
+      right: ['SCK', 'MOSI', 'MISO', 'CS', 'SDA', 'SCL', 'TX', 'RX'],
+      top: ['3V3', '5V'],
+      bottom: ['GND', 'GND']
+    },
+    render(chip) {
+      const notch = document.createElement('span');
+      const led = document.createElement('span');
+      const title = document.createElement('div');
+      const subtitle = document.createElement('div');
+      const stats = document.createElement('div');
+      const hint = document.createElement('div');
+
+      notch.className = 'chip-notch';
+      led.className = 'chip-led';
+      title.className = 'chip-title';
+      title.textContent = 'WASM CPU';
+      subtitle.className = 'chip-subtitle';
+      subtitle.textContent = 'wasm-rtos · wasm3';
+      stats.className = 'chip-stats';
+      hint.className = 'chip-drop-hint';
+      hint.textContent = 'drop .wasm to run';
+
+      const stat = (label) => {
+        const wrapper = document.createElement('div');
+        const value = document.createElement('strong');
+        const caption = document.createElement('span');
+        wrapper.className = 'chip-stat';
+        value.textContent = '0';
+        caption.textContent = label;
+        wrapper.append(value, caption);
+        stats.appendChild(wrapper);
+        return value;
+      };
+
+      cpuView.tasks = stat('TASKS');
+      cpuView.ready = stat('READY');
+      cpuView.fuel = stat('MFUEL/S');
+      cpuView.led = led;
+      chip.append(notch, led, title, subtitle, stats, hint);
+    }
+  });
+}
+
+function renderLibrary() {
+  const query = librarySearch.value.trim().toLowerCase();
+  const fragment = document.createDocumentFragment();
+  let lastCategory = '';
+
+  PARTS
+    .filter((part) => !query || `${part.name} ${part.meta} ${part.category}`.toLowerCase().includes(query))
+    .forEach((part) => {
+      if (part.category !== lastCategory) {
+        const heading = document.createElement('div');
+        heading.className = 'library-category';
+        heading.textContent = part.category;
+        fragment.appendChild(heading);
+        lastCategory = part.category;
+      }
+
+      const item = document.createElement('button');
+      const icon = document.createElement('span');
+      const text = document.createElement('span');
+      const name = document.createElement('span');
+      const meta = document.createElement('span');
+      const tag = document.createElement('span');
+
+      item.type = 'button';
+      item.className = 'library-item';
+      item.disabled = !part.available;
+      item.dataset.partId = part.id;
+      if (part.id === Board.getSelected()) item.classList.add('is-selected');
+      icon.className = 'library-item-icon';
+      icon.textContent = part.icon;
+      text.className = 'library-item-text';
+      name.className = 'library-item-name';
+      name.textContent = part.name;
+      meta.className = 'library-item-meta';
+      meta.textContent = part.meta;
+      tag.className = part.available ? 'library-item-tag is-placed' : 'library-item-tag';
+      tag.textContent = part.available ? 'on board' : 'planned';
+
+      text.append(name, meta);
+      item.append(icon, text, tag);
+      fragment.appendChild(item);
+    });
+
+  libraryList.replaceChildren(fragment);
+}
+
+libraryList.addEventListener('click', (event) => {
+  const item = event.target.closest('.library-item');
+  if (!item || item.disabled) return;
+  Board.select(item.dataset.partId);
+  Board.fit();
+});
+
+librarySearch.addEventListener('input', renderLibrary);
+Board.on('select', renderLibrary);
+
+const isNarrow = () => window.matchMedia('(max-width: 900px)').matches;
+
+function setPanel(name, visible) {
+  const button = document.querySelector(`#toggle${name[0].toUpperCase()}${name.slice(1)}`);
+  if (isNarrow() && name !== 'editor') {
+    app.classList.toggle(`show-${name}`, visible);
+  } else {
+    app.classList.toggle(`no-${name}`, !visible);
+  }
+  button.classList.toggle('is-on', visible);
+  button.setAttribute('aria-pressed', String(visible));
+}
+
+function togglePanel(name) {
+  const button = document.querySelector(`#toggle${name[0].toUpperCase()}${name.slice(1)}`);
+  setPanel(name, button.getAttribute('aria-pressed') !== 'true');
+}
+
+function syncPanelsToViewport() {
+  ['library', 'inspector'].forEach((name) => {
+    app.classList.remove(`show-${name}`, `no-${name}`);
+    setPanel(name, !isNarrow());
+  });
+}
+
+['library', 'inspector', 'editor'].forEach((name) => {
+  document.querySelector(`#toggle${name[0].toUpperCase()}${name.slice(1)}`)
+    .addEventListener('click', () => togglePanel(name));
+});
+window.matchMedia('(max-width: 900px)').addEventListener('change', syncPanelsToViewport);
+
+runButton.addEventListener('click', toggleRun);
+
+document.addEventListener('keydown', (event) => {
+  if (event.target.closest('input, textarea, select, button, [contenteditable]')) return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const key = event.key.toLowerCase();
+  if (event.key === ' ') toggleRun();
+  else if (key === 'l') togglePanel('library');
+  else if (key === 'i') togglePanel('inspector');
+  else if (key === 'e') togglePanel('editor');
+  else if (key === 'o') openPicker();
+  else return;
+  event.preventDefault();
+});
+
+// Editor tabs
+const editorTabs = [...document.querySelectorAll('.editor-tabs .tab')];
+editorTabs.forEach((tab) => {
+  tab.addEventListener('click', () => {
+    editorTabs.forEach((other) => {
+      const active = other === tab;
+      other.classList.toggle('is-active', active);
+      other.setAttribute('aria-selected', String(active));
+      document.querySelector(`#${other.getAttribute('aria-controls')}`).hidden = !active;
+    });
+    if (tab.id === 'consoleTab') consoleLog.scrollTop = consoleLog.scrollHeight;
+  });
+});
+
+// Editor height: drag the top edge, or use arrow keys on it.
+function setEditorHeight(height) {
+  const max = Math.max(120, window.innerHeight - 200);
+  const clamped = Math.round(Math.min(max, Math.max(110, height)));
+  document.documentElement.style.setProperty('--editor-h', `${clamped}px`);
+  try { localStorage.setItem('wasm-rtos.editor-height', String(clamped)); } catch (error) { /* optional */ }
+}
+
+editorResize.addEventListener('pointerdown', (event) => {
+  editorResize.setPointerCapture(event.pointerId);
+  const startY = event.clientY;
+  const startHeight = editorPanel.getBoundingClientRect().height;
+  const move = (moveEvent) => setEditorHeight(startHeight + startY - moveEvent.clientY);
+  const stop = () => {
+    editorResize.removeEventListener('pointermove', move);
+    editorResize.removeEventListener('pointerup', stop);
+    editorResize.removeEventListener('pointercancel', stop);
+  };
+  editorResize.addEventListener('pointermove', move);
+  editorResize.addEventListener('pointerup', stop);
+  editorResize.addEventListener('pointercancel', stop);
+});
+
+editorResize.addEventListener('keydown', (event) => {
+  const height = editorPanel.getBoundingClientRect().height;
+  if (event.key === 'ArrowUp') setEditorHeight(height + 20);
+  else if (event.key === 'ArrowDown') setEditorHeight(height - 20);
+  else return;
+  event.preventDefault();
+});
+
+try {
+  const savedHeight = Number(localStorage.getItem('wasm-rtos.editor-height'));
+  if (savedHeight) setEditorHeight(savedHeight);
+} catch (error) {
+  // Storage unavailable; keep the default height.
+}
+
+/* ---------- Runtime lifecycle ---------- */
 
 function refreshRuntimeState() {
   if (!runtime) return;
@@ -1150,18 +1316,8 @@ function refreshRuntimeState() {
   tasks.forEach((task) => {
     if (task.osTaskId) {
       task.status = stateToStatus(task.osTaskId);
-      task.priority = callRuntime(
-        'browser_task_get_priority',
-        'number',
-        ['number'],
-        [task.osTaskId]
-      );
-      const runCount = callRuntime(
-        'browser_task_get_run_count',
-        'number',
-        ['number'],
-        [task.osTaskId]
-      ) >>> 0;
+      task.priority = callRuntime('browser_task_get_priority', 'number', ['number'], [task.osTaskId]);
+      const runCount = callRuntime('browser_task_get_run_count', 'number', ['number'], [task.osTaskId]) >>> 0;
       if (runCount !== task.runCount) {
         task.runCount = runCount;
         task.lastRunAt = sampledAt;
@@ -1185,7 +1341,7 @@ function updateRuntimeClock() {
   const hours = String(Math.floor(seconds / 3600)).padStart(2, '0');
   const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
   const remaining = String(seconds % 60).padStart(2, '0');
-  runtimeClock.textContent = `${hours}:${minutes}:${remaining}`;
+  lcdClock.textContent = `${hours}:${minutes}:${remaining}`;
 }
 
 async function initializeRuntime() {
@@ -1206,16 +1362,25 @@ async function initializeRuntime() {
     setFuelRate(fuelRatePerMs);
     initializeTraceTelemetry();
     runtimeStartedAt = performance.now();
-    runtimeStatus.textContent = 'Runtime: OK';
+    runtimeStatus.textContent = 'Running';
     runtimeStatusDetail.textContent = 'wasm-rtos is ready';
     appendLog('wasm-rtos initialized');
   } catch (error) {
-    runtimeStatus.textContent = 'Runtime: Failed';
+    runtime = null;
+    runtimeFailed = true;
+    runtimeStatus.textContent = 'Failed';
     runtimeStatusDetail.textContent = error.message;
     appendLog(`Runtime initialization failed: ${error.message}`);
   }
+  renderRunState();
   renderTasks();
 }
+
+createCpuNode();
+if (!Board.hasSavedView()) Board.fit();
+Board.select(CPU_NODE_ID);
+renderLibrary();
+syncPanelsToViewport();
 
 setInterval(refreshRuntimeState, 250);
 setInterval(updateRuntimeClock, 1000);
@@ -1227,41 +1392,6 @@ fuelRateInput.addEventListener('change', () => setFuelRate(fuelRateInput.value |
 schedulerTimelineCanvas.addEventListener('pointermove', showTimelineTooltip);
 schedulerTimelineCanvas.addEventListener('pointerleave', hideTimelineTooltip);
 renderFuelRate();
+renderTasks();
 initializeRuntime();
 requestAnimationFrame(drawSchedulerTimeline);
-
-const canvas = document.querySelector('#previewCanvas');
-const ctx = canvas.getContext('2d');
-
-function resizeCanvas() {
-  const rect = canvas.getBoundingClientRect();
-  const scale = window.devicePixelRatio || 1;
-  canvas.width = Math.max(1, Math.floor(rect.width * scale));
-  canvas.height = Math.max(1, Math.floor(rect.height * scale));
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
-}
-
-function drawPreview(now) {
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = '#191919';
-  ctx.fillRect(0, 0, width, height);
-  ctx.strokeStyle = 'rgba(255,255,255,.06)';
-  for (let x = 0; x < width; x += 42) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
-  for (let y = 0; y < height; y += 42) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
-  const radius = 42 + Math.sin(now * 0.001) * 8;
-  ctx.strokeStyle = '#ededed';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(width / 2, height / 2, radius, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = '#f3f3f3';
-  ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-  ctx.fillText(runtime ? 'WASM-RTOS: RUNNING' : 'WASM-RTOS: LOADING', 18, height - 24);
-  requestAnimationFrame(drawPreview);
-}
-
-resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
-requestAnimationFrame(drawPreview);
