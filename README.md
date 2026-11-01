@@ -29,6 +29,8 @@ cannot load the runtime.
 
 ## Deployment
 
-`.github/workflows/build-browser.yml` rebuilds the runtime on every push to the
-site sources or the `os/wasm-rtos` submodule, verifies the outputs and commits
-the updated runtime files, which GitHub Pages then serves.
+`.github/workflows/build-browser.yml` rebuilds the runtime on every push and
+pull request that touches the site sources or the `os/wasm-rtos` submodule, and
+verifies the outputs. On `main` it also commits the updated runtime files,
+which GitHub Pages then serves; other branches and pull requests only build,
+so CI never commits to them.
