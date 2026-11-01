@@ -41,8 +41,7 @@ const OS_TASK_READY = 0;
 const OS_TASK_RUNNING = 1;
 const OS_TASK_WAITING = 2;
 const OS_TASK_SUSPENDED = 3;
-const OS_TASK_SWAPPED = 4;
-const OS_TASK_DEAD = 5;
+const OS_TASK_DEAD = 4;
 
 const OS_TASK_EXIT_RETURNED = 1;
 const OS_TASK_EXIT_EXPLICIT = 2;
@@ -737,11 +736,11 @@ function showTimelineTooltip(pointerEvent) {
 
 function stateToStatus(taskId) {
   const state = callRuntime('browser_task_get_state', 'number', ['number'], [taskId]);
+  if (state !== OS_TASK_DEAD && callRuntime('browser_task_is_swapped', 'number', ['number'], [taskId])) return 'Swapped';
   if (state === OS_TASK_READY) return 'Ready';
   if (state === OS_TASK_RUNNING) return 'Running';
   if (state === OS_TASK_WAITING) return 'Waiting';
   if (state === OS_TASK_SUSPENDED) return 'Paused';
-  if (state === OS_TASK_SWAPPED) return 'Swapped';
   if (state !== OS_TASK_DEAD) return 'Failed';
 
   const reason = callRuntime('browser_task_get_exit_reason', 'number', ['number'], [taskId]);

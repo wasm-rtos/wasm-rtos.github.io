@@ -1050,6 +1050,13 @@ uint32_t browser_task_get_state(uint32_t task_id)
 }
 
 EMSCRIPTEN_KEEPALIVE
+uint32_t browser_task_is_swapped(uint32_t task_id)
+{
+    BrowserTaskRecord* record = browser_find_record(task_id);
+    return record != NULL ? (uint32_t)os_task_is_swapped(record->task) : 0U;
+}
+
+EMSCRIPTEN_KEEPALIVE
 uint32_t browser_task_get_priority(uint32_t task_id)
 {
     BrowserTaskRecord* record = browser_find_record(task_id);
