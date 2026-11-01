@@ -52,7 +52,7 @@ if [ "${#wasm3_sources[@]}" -eq 0 ]; then
     exit 1
 fi
 
-exported_functions='["_main","_malloc","_free","_browser_runtime_init","_browser_runtime_shutdown","_browser_task_spawn","_browser_fs_write","_browser_fs_remove","_browser_fs_list","_browser_fs_file_size","_browser_task_delete","_browser_task_suspend","_browser_task_resume","_browser_task_set_priority","_browser_runtime_step","_browser_runtime_set_slices_per_frame","_browser_runtime_set_fuel_per_ms","_browser_runtime_get_fuel_per_ms","_browser_runtime_get_fuel_per_slice","_browser_runtime_get_scheduled_slice_count","_browser_trace_get_oldest_sequence","_browser_trace_get_latest_sequence","_browser_trace_get_clock_ms","_browser_trace_read","_browser_task_get_state","_browser_gpio_get_level","_browser_gpio_ground","_browser_task_is_swapped","_browser_task_get_priority","_browser_task_get_run_count","_browser_task_get_exit_reason","_browser_task_get_exit_code","_browser_runtime_get_task_count","_browser_runtime_get_ready_task_count","_browser_runtime_get_waiting_task_count","_browser_runtime_get_timer_count","_browser_runtime_get_last_error"]'
+exported_functions='["_main","_malloc","_free","_browser_runtime_init","_browser_runtime_shutdown","_browser_task_spawn","_browser_fs_write","_browser_fs_remove","_browser_fs_list","_browser_fs_file_size","_browser_task_delete","_browser_task_suspend","_browser_task_resume","_browser_task_set_priority","_browser_runtime_step","_browser_runtime_set_slices_per_frame","_browser_runtime_set_fuel_per_ms","_browser_runtime_get_fuel_per_ms","_browser_runtime_get_fuel_per_slice","_browser_runtime_get_scheduled_slice_count","_browser_trace_get_oldest_sequence","_browser_trace_get_latest_sequence","_browser_trace_get_clock_ms","_browser_trace_read","_browser_task_get_state","_browser_task_get_memory_usage","_browser_task_get_app_name","_browser_task_get_error","_browser_task_swap_out","_browser_gpio_add_pin","_browser_gpio_get_owner","_browser_gpio_get_level","_browser_gpio_ground","_browser_task_is_swapped","_browser_task_get_priority","_browser_task_get_run_count","_browser_task_get_exit_reason","_browser_task_get_exit_code","_browser_runtime_get_task_count","_browser_runtime_get_ready_task_count","_browser_runtime_get_waiting_task_count","_browser_runtime_get_timer_count","_browser_runtime_get_last_error"]'
 exported_runtime_methods='["ccall","cwrap","UTF8ToString","HEAPU8"]'
 
 rm -f "$OUTPUT_JS" "$OUTPUT_WASM"
@@ -64,6 +64,7 @@ rm -f "$OUTPUT_JS" "$OUTPUT_WASM"
     -Wextra \
     -D_GNU_SOURCE \
     -Dd_m3HasWASI \
+    -Dd_m3RecordBacktraces=1 \
     -I. \
     -I"$WASM_RTOS_DIR" \
     -I"$WASM3_SOURCE_DIR" \

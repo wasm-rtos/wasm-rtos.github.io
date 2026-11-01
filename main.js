@@ -63,7 +63,6 @@ const statusIcons = {
   Ready: '◷',
   Waiting: '◷',
   Paused: 'Ⅱ',
-  Swapped: '◇',
   Completed: '✓',
   Failed: '×',
   Stopped: '■'
@@ -91,6 +90,11 @@ const consoleLog = document.querySelector('#consoleLog');
 const runtimeStatus = document.querySelector('#runtimeStatus');
 const runtimeStatusDetail = document.querySelector('#runtimeStatusDetail');
 const memoryValue = document.querySelector('#memoryValue');
+const deviceValue = document.querySelector('#deviceValue');
+const programSection = document.querySelector('#programSection');
+const programTitle = document.querySelector('#programTitle');
+const programProps = document.querySelector('#programProps');
+const programError = document.querySelector('#programError');
 const fileInput = document.querySelector('#wasmFile');
 const pageDropOverlay = document.querySelector('#pageDropOverlay');
 const loadButton = document.querySelector('#loadButton');
@@ -737,7 +741,6 @@ function showTimelineTooltip(pointerEvent) {
 
 function stateToStatus(taskId) {
   const state = callRuntime('browser_task_get_state', 'number', ['number'], [taskId]);
-  if (state !== OS_TASK_DEAD && callRuntime('browser_task_is_swapped', 'number', ['number'], [taskId])) return 'Swapped';
   if (state === OS_TASK_READY) return 'Ready';
   if (state === OS_TASK_RUNNING) return 'Running';
   if (state === OS_TASK_WAITING) return 'Waiting';
@@ -805,6 +808,9 @@ function createTaskActions(task) {
   if (canPause) actions.appendChild(createActionButton(task, 'pause', 'Pause', 'Ⅱ'));
   else if (canResume) actions.appendChild(createActionButton(task, 'resume', 'Resume', '▶'));
   if (canStop) actions.appendChild(createActionButton(task, 'stop', 'Stop', '■'));
+  if (task.osTaskId && !task.swapped && ['Ready', 'Waiting', 'Paused'].includes(task.status)) {
+    actions.appendChild(createActionButton(task, 'swap', 'Swap out of RAM', '⇣'));
+  }
   actions.appendChild(createActionButton(task, 'restart', 'Restart', '↻'));
   actions.appendChild(createActionButton(task, 'remove', 'Remove', '✕'));
   return actions;
@@ -822,7 +828,9 @@ function createTaskRow(task, now) {
   const runLabel = task.runCount === 1 ? 'run' : 'runs';
 
   row.className = 'task';
+  row.dataset.taskId = task.localId;
   if (task.activityUntil > now) row.classList.add('is-recently-active');
+  if (task.localId === selectedTaskId) row.classList.add('is-selected');
 
   dot.className = 'task-dot';
   dot.style.background = task.traceColor;
@@ -832,7 +840,8 @@ function createTaskRow(task, now) {
 
   status.className = 'task-status';
   status.dataset.status = task.status;
-  status.textContent = `${statusIcons[task.status] || '?'} ${task.status}`;
+  status.textContent = `${statusIcons[task.status] || '?'} ${task.status}${task.swapped ? ' · in swap' : ''}`;
+  if (task.swapped) status.title = 'Out of RAM; it comes back when it runs';
 
   runs.textContent = `${integerNumberFormat.format(task.runCount)} ${runLabel} · ${formatLastRun(task.lastRunAt, now)}`;
 
@@ -866,6 +875,7 @@ function renderTasks() {
     taskList.replaceChildren(...tasks.map((task) => createTaskRow(task, now)));
   }
   updateCounters();
+  renderProgram();
 }
 
 function updateCounters() {
@@ -945,6 +955,10 @@ async function handleTaskAction(task, action) {
       const status = callRuntime('browser_task_suspend', 'number', ['number'], [task.osTaskId]);
       if (status !== OS_STATUS_OK) throw new Error(runtimeError());
       task.status = 'Paused';
+      // A paused program has nothing to do: it leaves RAM until resumed.
+      swapOut(task);
+    } else if (action === 'swap') {
+      swapOut(task);
     } else if (action === 'resume') {
       const status = callRuntime('browser_task_resume', 'number', ['number'], [task.osTaskId]);
       if (status !== OS_STATUS_OK) throw new Error(runtimeError());
@@ -969,7 +983,11 @@ async function handleTaskAction(task, action) {
 
 taskList.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-action]');
-  if (!button) return;
+  if (!button) {
+    const row = event.target.closest('.task');
+    if (row && !event.target.closest('input, label')) selectTask(row.dataset.taskId);
+    return;
+  }
   const task = findTask(button.dataset.id);
   if (task) handleTaskAction(task, button.dataset.action);
 });
@@ -995,6 +1013,112 @@ taskList.addEventListener('keydown', (event) => {
     input.blur();
   }
 });
+
+/* ---------- Program inspector ---------- */
+
+let selectedTaskId = '';
+
+function selectTask(localId) {
+  selectedTaskId = localId;
+  renderTasks();
+}
+
+// Swapping is an optimisation: when it cannot happen, the program stays in RAM.
+function swapOut(task) {
+  const before = readTaskMemory(task.osTaskId);
+  if (callRuntime('browser_task_swap_out', 'number', ['number'], [task.osTaskId]) !== OS_STATUS_OK) {
+    appendLog(`${task.id}: stays in RAM (${runtimeError()})`);
+    return;
+  }
+  const after = readTaskMemory(task.osTaskId);
+  if (before && after) {
+    appendLog(`${task.id}: swapped out, ${formatSize(before.total - after.total)} of RAM freed, ` +
+      `${formatSize(after.swap)} in swap`);
+  }
+  task.status = stateToStatus(task.osTaskId);
+  task.swapped = true;
+}
+
+// os_task_get_memory_usage for a task, or null.
+function readTaskMemory(taskId) {
+  if (!runtime || !taskId) return null;
+  const out = runtime._malloc(40);
+  try {
+    if (callRuntime('browser_task_get_memory_usage', 'number', ['number', 'number'], [taskId, out]) !== OS_STATUS_OK) {
+      return null;
+    }
+    const view = new DataView(runtime.HEAPU8.buffer, out, 40);
+    const field = (index) => view.getUint32(index * 4, true);
+    return {
+      stack: field(0), stackPeak: field(1), memory: field(2), code: field(3), interpreter: field(4),
+      interpreterPeak: field(5), image: field(6), swap: field(7), kernel: field(8), total: field(9)
+    };
+  } finally {
+    runtime._free(out);
+  }
+}
+
+function readTaskString(name, taskId) {
+  const pointer = taskId ? callRuntime(name, 'number', ['number'], [taskId]) : 0;
+  return pointer ? runtime.UTF8ToString(pointer) : '';
+}
+
+// The pins a task owns, by every name programs may use for them.
+function ownedPins(taskId) {
+  const pins = [...new Set(DEVICE_PROFILE.pins.map((entry) => entry.pin))];
+  return pins
+    .filter((pin) => callRuntime('browser_gpio_get_owner', 'number', ['number'], [pin]) === taskId)
+    .map((pin) => `GPIO${pin} (${pinNames(pin).filter((name) => name !== `gpio${pin}`).join(', ') || `gpio${pin}`})`);
+}
+
+function renderProgram() {
+  const task = tasks.find((entry) => entry.localId === selectedTaskId);
+  programSection.hidden = !task;
+  if (!task || !runtime) return;
+
+  const rows = [];
+  const add = (label, value) => { if (value !== '' && value !== null && value !== undefined) rows.push([label, value]); };
+  const appName = readTaskString('browser_task_get_app_name', task.osTaskId);
+  const memory = readTaskMemory(task.osTaskId);
+
+  programTitle.textContent = appName || task.app;
+  add('File', task.path);
+  add('Task', task.id);
+  add('State', task.swapped ? `${task.status}, in swap` : task.status);
+  add('Priority', String(task.priority));
+  add('Runs', integerNumberFormat.format(task.runCount));
+  const ended = ['Completed', 'Failed', 'Stopped'].includes(task.status);
+  if (memory && ended) {
+    add('Stack', `${formatSize(memory.stackPeak)} at most`);
+  } else if (memory) {
+    const inRam = memory.total;
+    add('RAM', formatSize(inRam));
+    add('Memory', formatSize(memory.memory));
+    add('Stack', memory.stack ? `${formatSize(memory.stackPeak)} of ${formatSize(memory.stack)} used`
+      : `${formatSize(memory.stackPeak)} at most`);
+    add('Code', formatSize(memory.code));
+    if (memory.interpreter) add('Interpreter', formatSize(memory.interpreter));
+    if (memory.image) add('Image', formatSize(memory.image));
+    add('Kernel', formatSize(memory.kernel));
+    if (memory.swap) add('In swap', formatSize(memory.swap));
+  }
+  if (task.osTaskId) {
+    const pins = ownedPins(task.osTaskId);
+    add('Pins', pins.length ? pins.join(', ') : 'none');
+  }
+
+  programProps.replaceChildren(...rows.flatMap(([label, value]) => {
+    const term = document.createElement('dt');
+    const detail = document.createElement('dd');
+    term.textContent = label;
+    detail.textContent = value;
+    return [term, detail];
+  }));
+
+  const error = readTaskString('browser_task_get_error', task.osTaskId);
+  programError.hidden = !error;
+  programError.textContent = error;
+}
 
 /* ---------- Files ---------- */
 
@@ -1104,6 +1228,7 @@ function runProgram(path) {
     appendLog(`${path}: ${error.message}`);
   }
   tasks.push(task);
+  selectedTaskId = task.localId;
   renderTasks();
 }
 
@@ -1601,16 +1726,46 @@ function createCpuNode() {
   });
 }
 
-/* GPIO parts: the kernel names their pins "led" and "button-a". */
-const LED_PIN = 2;
-const BUTTON_PIN = 0;
-const partView = { led: null };
+/*
+ * The simulated device, as data: the pins the kernel lends to programs and
+ * the parts wired to them. A program asks for "led" and gets GPIO2 here, and
+ * whatever pin another profile names "led".
+ */
+const GPIO_CAN_ALL = 0x3f;
+const DEVICE_PROFILE = {
+  name: 'Dev board',
+  pins: [
+    ...Array.from({ length: 8 }, (_, pin) => ({ name: `gpio${pin}`, pin, capabilities: GPIO_CAN_ALL })),
+    { name: 'button-a', pin: 0, capabilities: GPIO_CAN_ALL },
+    { name: 'led', pin: 2, capabilities: GPIO_CAN_ALL }
+  ],
+  parts: [
+    { id: 'led', type: 'led', pin: 2, title: 'LED', x: -400, y: -110 },
+    { id: 'button', type: 'button', pin: 0, title: 'BUTTON', x: -400, y: 30 }
+  ]
+};
+const partView = { leds: [] };
 
-function createPartNode(id, x, y, title, pinLabel, build) {
+function applyDeviceProfile() {
+  DEVICE_PROFILE.pins.forEach(({ name, pin, capabilities, options = 0 }) => {
+    const status = callRuntime('browser_gpio_add_pin', 'number', ['string', 'number', 'number', 'number'],
+      [name, pin, capabilities, options]);
+    if (status !== OS_STATUS_OK) throw new Error(`pin ${name}: ${runtimeError()}`);
+  });
+  deviceValue.textContent = DEVICE_PROFILE.name;
+}
+
+// The names a program may open a pin by.
+function pinNames(pin) {
+  return DEVICE_PROFILE.pins.filter((entry) => entry.pin === pin).map((entry) => entry.name);
+}
+
+function createPartNode(part, build) {
+  const pinLabel = `GPIO${part.pin}`;
   Board.addNode({
-    id,
-    x,
-    y,
+    id: part.id,
+    x: part.x,
+    y: part.y,
     width: 120,
     height: 110,
     pins: { right: [pinLabel], bottom: ['GND'] },
@@ -1618,7 +1773,7 @@ function createPartNode(id, x, y, title, pinLabel, build) {
       const name = document.createElement('div');
       const meta = document.createElement('div');
       name.className = 'chip-subtitle part-title';
-      name.textContent = title;
+      name.textContent = part.title;
       meta.className = 'chip-subtitle';
       meta.textContent = pinLabel;
       chip.append(build(), name, meta);
@@ -1626,39 +1781,46 @@ function createPartNode(id, x, y, title, pinLabel, build) {
   });
 }
 
+function createLed(part) {
+  const led = document.createElement('span');
+  led.className = 'part-led';
+  partView.leds.push({ element: led, pin: part.pin });
+  return led;
+}
+
+function createButton(part) {
+  const button = document.createElement('button');
+  const press = (down) => (event) => {
+    event.stopPropagation();
+    button.classList.toggle('is-pressed', down);
+    if (runtime) callRuntime('browser_gpio_ground', null, ['number', 'number'], [part.pin, down ? 1 : 0]);
+  };
+  button.type = 'button';
+  button.className = 'part-button';
+  button.title = `Hold to connect GPIO${part.pin} to ground`;
+  button.setAttribute('aria-label', `Push button on GPIO${part.pin}`);
+  button.addEventListener('pointerdown', press(true));
+  button.addEventListener('pointerup', press(false));
+  button.addEventListener('pointerleave', (event) => { if (button.classList.contains('is-pressed')) press(false)(event); });
+  button.addEventListener('keydown', (event) => {
+    if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) { event.preventDefault(); press(true)(event); }
+  });
+  button.addEventListener('keyup', (event) => {
+    if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); press(false)(event); }
+  });
+  return button;
+}
+
 function createGpioParts() {
-  createPartNode('led', -400, -110, 'LED', 'GPIO2', () => {
-    partView.led = document.createElement('span');
-    partView.led.className = 'part-led';
-    return partView.led;
-  });
-  createPartNode('button', -400, 30, 'BUTTON', 'GPIO0', () => {
-    const button = document.createElement('button');
-    const press = (down) => (event) => {
-      event.stopPropagation();
-      button.classList.toggle('is-pressed', down);
-      if (runtime) callRuntime('browser_gpio_ground', null, ['number', 'number'], [BUTTON_PIN, down ? 1 : 0]);
-    };
-    button.type = 'button';
-    button.className = 'part-button';
-    button.title = 'Hold to connect GPIO0 to ground';
-    button.setAttribute('aria-label', 'Push button on GPIO0');
-    button.addEventListener('pointerdown', press(true));
-    button.addEventListener('pointerup', press(false));
-    button.addEventListener('pointerleave', (event) => { if (button.classList.contains('is-pressed')) press(false)(event); });
-    button.addEventListener('keydown', (event) => {
-      if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) { event.preventDefault(); press(true)(event); }
-    });
-    button.addEventListener('keyup', (event) => {
-      if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); press(false)(event); }
-    });
-    return button;
-  });
+  const builders = { led: createLed, button: createButton };
+  DEVICE_PROFILE.parts.forEach((part) => createPartNode(part, () => builders[part.type](part)));
 }
 
 function drawGpioParts() {
-  if (runtime && partView.led) {
-    partView.led.classList.toggle('is-on', callRuntime('browser_gpio_get_level', 'number', ['number'], [LED_PIN]) === 1);
+  if (runtime) {
+    partView.leds.forEach(({ element, pin }) => {
+      element.classList.toggle('is-on', callRuntime('browser_gpio_get_level', 'number', ['number'], [pin]) === 1);
+    });
   }
   requestAnimationFrame(drawGpioParts);
 }
@@ -1838,7 +2000,12 @@ function refreshRuntimeState() {
   const sampledAt = performance.now();
   tasks.forEach((task) => {
     if (task.osTaskId) {
+      const previous = task.status;
       task.status = stateToStatus(task.osTaskId);
+      task.swapped = callRuntime('browser_task_is_swapped', 'number', ['number'], [task.osTaskId]) === 1;
+      if (task.status === 'Failed' && previous !== 'Failed') {
+        appendLog(`${task.id} failed: ${readTaskString('browser_task_get_error', task.osTaskId) || runtimeError()}`);
+      }
       task.priority = callRuntime('browser_task_get_priority', 'number', ['number'], [task.osTaskId]);
       const runCount = callRuntime('browser_task_get_run_count', 'number', ['number'], [task.osTaskId]) >>> 0;
       if (runCount !== task.runCount) {
@@ -1881,6 +2048,7 @@ async function initializeRuntime() {
     });
     const status = callRuntime('browser_runtime_init', 'number', [], []);
     if (status !== OS_STATUS_OK) throw new Error(runtimeError());
+    applyDeviceProfile();
     fuelPerSlice = callRuntime('browser_runtime_get_fuel_per_slice', 'number') || fuelPerSlice;
     setFuelRate(fuelRatePerMs);
     initializeTraceTelemetry();

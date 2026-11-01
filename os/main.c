@@ -98,31 +98,61 @@ static const OsGpioPort g_browser_gpio_port =
     NULL, browser_gpio_configure, browser_gpio_write, browser_gpio_read
 };
 
-/* The board's pins, and the parts drawn on the page under their names. */
+/* The page registers the pins of its device profile (browser_gpio_add_pin). */
 static OsStatus browser_gpio_start(void)
 {
-    static const char* const names[BROWSER_GPIO_PINS] =
-    {
-        "gpio0", "gpio1", "gpio2", "gpio3", "gpio4", "gpio5", "gpio6", "gpio7"
-    };
-    OsStatus status = os_gpio_port_set(&g_browser_gpio_port);
-    uint32_t pin = 0U;
-
     memset(&g_board, 0, sizeof(g_board));
-    for (pin = 0U; status == OS_STATUS_OK && pin < BROWSER_GPIO_PINS; ++pin)
-    {
-        status = os_gpio_add_pin(names[pin], pin, OS_GPIO_CAN_ALL, 0U);
-    }
-    if (status == OS_STATUS_OK)
-    {
-        status = os_gpio_add_pin("button-a", 0U, OS_GPIO_CAN_ALL, 0U);
-    }
-    if (status == OS_STATUS_OK)
-    {
-        status = os_gpio_add_pin("led", 2U, OS_GPIO_CAN_ALL, 0U);
-    }
-    return status;
+    return os_gpio_port_set(&g_browser_gpio_port);
 }
+
+/*
+ * Swap storage outside the runtime's own memory: images live in JavaScript,
+ * so swapping a program out really gives its memory back to the runtime.
+ */
+EM_JS(int, browser_swap_write_js, (uint32_t task_id, uint32_t offset, const void* data, uint32_t size), {
+    const images = Module.swapImages || (Module.swapImages = new Map());
+    let image = images.get(task_id) || new Uint8Array(0);
+    if (offset !== image.length) return 1;
+    const grown = new Uint8Array(image.length + size);
+    grown.set(image);
+    grown.set(HEAPU8.subarray(data, data + size), image.length);
+    images.set(task_id, grown);
+    return 0;
+});
+
+EM_JS(int, browser_swap_read_js, (uint32_t task_id, uint32_t offset, void* data, uint32_t size), {
+    const image = Module.swapImages && Module.swapImages.get(task_id);
+    if (!image || offset + size > image.length) return 1;
+    HEAPU8.set(image.subarray(offset, offset + size), data);
+    return 0;
+});
+
+EM_JS(void, browser_swap_discard_js, (uint32_t task_id), {
+    if (Module.swapImages) Module.swapImages.delete(task_id);
+});
+
+static OsStatus browser_swap_write(void* context, uint32_t task_id, uint32_t offset, const void* data, uint32_t size)
+{
+    (void)context;
+    return browser_swap_write_js(task_id, offset, data, size) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
+}
+
+static OsStatus browser_swap_read(void* context, uint32_t task_id, uint32_t offset, void* data, uint32_t size)
+{
+    (void)context;
+    return browser_swap_read_js(task_id, offset, data, size) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
+}
+
+static void browser_swap_discard(void* context, uint32_t task_id)
+{
+    (void)context;
+    browser_swap_discard_js(task_id);
+}
+
+static const OsSwapPort g_browser_swap_port =
+{
+    NULL, browser_swap_write, browser_swap_read, browser_swap_discard
+};
 
 typedef struct BrowserTaskRecord
 {
@@ -812,9 +842,13 @@ int browser_runtime_init(void)
     }
 
     status = browser_gpio_start();
+    if (status == OS_STATUS_OK)
+    {
+        status = os_swap_port_set(&g_browser_swap_port);
+    }
     if (status != OS_STATUS_OK)
     {
-        browser_set_error("os_gpio_add_pin", status);
+        browser_set_error("browser_runtime_init", status);
         os_shutdown();
         browser_clock_stop();
         return (int)status;
@@ -826,6 +860,24 @@ int browser_runtime_init(void)
     g_scheduled_slice_count = 0U;
     browser_trace_reset();
     return (int)OS_STATUS_OK;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int browser_gpio_add_pin(const char* name, uint32_t pin, uint32_t capabilities, uint32_t options)
+{
+    OsStatus status = pin < BROWSER_GPIO_PINS ? os_gpio_add_pin(name, pin, capabilities, options)
+                                              : OS_STATUS_INVALID_ARGUMENT;
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_gpio_add_pin", status);
+    }
+    return (int)status;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_gpio_get_owner(uint32_t pin)
+{
+    return os_gpio_get_owner(pin);
 }
 
 /* The level a part on the page sees on a pin. */
@@ -1180,6 +1232,65 @@ uint32_t browser_task_get_state(uint32_t task_id)
 {
     BrowserTaskRecord* record = browser_find_record(task_id);
     return record != NULL ? (uint32_t)os_task_get_state(record->task) : (uint32_t)OS_TASK_DEAD;
+}
+
+/*
+ * A task's memory, as os_task_get_memory_usage reports it, into ten u32
+ * values at out: stack, stack peak, linear memory, code, interpreter,
+ * interpreter peak, image, swap, kernel, total.
+ */
+EMSCRIPTEN_KEEPALIVE
+int browser_task_get_memory_usage(uint32_t task_id, uint32_t* out)
+{
+    BrowserTaskRecord* record = browser_find_record(task_id);
+    OsTaskMemoryUsage usage;
+    OsStatus status = OS_STATUS_TASK_NOT_FOUND;
+
+    if (record != NULL)
+    {
+        status = os_task_get_memory_usage(record->task, &usage);
+    }
+    if (status != OS_STATUS_OK)
+    {
+        return (int)status;
+    }
+    out[0] = usage.stack_bytes;
+    out[1] = usage.stack_peak_bytes;
+    out[2] = usage.linear_memory_bytes;
+    out[3] = usage.code_bytes;
+    out[4] = usage.interpreter_bytes;
+    out[5] = usage.interpreter_peak_bytes;
+    out[6] = usage.image_bytes;
+    out[7] = usage.swap_bytes;
+    out[8] = usage.kernel_bytes;
+    out[9] = usage.total_bytes;
+    return (int)OS_STATUS_OK;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char* browser_task_get_app_name(uint32_t task_id)
+{
+    BrowserTaskRecord* record = browser_find_record(task_id);
+    return record != NULL ? os_task_get_app_name(record->task) : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char* browser_task_get_error(uint32_t task_id)
+{
+    BrowserTaskRecord* record = browser_find_record(task_id);
+    return record != NULL ? os_task_get_error(record->task) : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int browser_task_swap_out(uint32_t task_id)
+{
+    BrowserTaskRecord* record = browser_find_record(task_id);
+    OsStatus status = record != NULL ? os_task_swap_out(record->task) : OS_STATUS_TASK_NOT_FOUND;
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_task_swap_out", status);
+    }
+    return (int)status;
 }
 
 EMSCRIPTEN_KEEPALIVE

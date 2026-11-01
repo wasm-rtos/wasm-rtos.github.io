@@ -540,6 +540,10 @@ button:disabled { cursor: default; opacity: .45; }
   border-bottom: 1px solid #3c3c3c;
 }
 .task.is-recently-active { background: rgba(151, 219, 160, .05); }
+.task { cursor: pointer; }
+.task.is-selected { box-shadow: inset 2px 0 0 var(--accent-select); background: rgba(255, 255, 255, .04); }
+.section-title-detail { margin-left: 6px; color: var(--gray-10); font-weight: 500; text-transform: none; letter-spacing: 0; }
+.program-error { color: var(--accent-error); font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; }
 .task-dot { width: 8px; height: 8px; border-radius: 50%; }
 .task-name { color: var(--gray-10); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task-meta {
