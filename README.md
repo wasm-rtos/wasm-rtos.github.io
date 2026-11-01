@@ -12,6 +12,19 @@ the kernel's file system; running a `.wasm` file starts it as a process by
 path (`os_task_spawn_path`), and it runs from the store without a copy.
 IndexedDB keeps a copy of the store, so the files survive a reload.
 
+The simulated device is described as data in `main.js` (`DEVICE_PROFILE`):
+the pins the kernel lends to programs, under the names programs open them by
+(`"led"`, `"button-a"`, `gpio0`…`gpio7`), and the parts wired to them. The
+runtime's GPIO port reports what programs drive and what the parts on the
+board do, such as a pressed button.
+
+Selecting a program in Tasks shows it in the Inspector: its name from its
+metadata, state, memory by kind (linear memory, stack and how much of it was
+used, compiled code, kernel), the pins it owns, and, when it failed, why and
+in which functions. Pausing a program, or the ⇣ button, swaps it out of RAM;
+swap images are kept in JavaScript, outside the runtime's memory, and the
+program comes back when it runs again.
+
 ## Building locally
 
 Requirements: Bash 3.2 or newer and Emscripten (macOS: `brew install emscripten`).
