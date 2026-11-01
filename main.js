@@ -117,6 +117,7 @@ const filesDelete = document.querySelector('#filesDelete');
 const filesInput = document.querySelector('#filesInput');
 const folderInput = document.querySelector('#folderInput');
 const pageDropDetail = document.querySelector('#pageDropDetail');
+const filesFootnote = document.querySelector('#filesFootnote');
 const librarySearch = document.querySelector('#librarySearch');
 const editorPanel = document.querySelector('#editorPanel');
 const editorResize = document.querySelector('#editorResize');
@@ -1242,9 +1243,14 @@ function deleteSelected() {
   if (!selected || !storePath(selected.path)) return;
   if (selected.type === FS_TYPE_DIRECTORY && !window.confirm(`Delete ${selected.path} and everything in it?`)) return;
 
-  const status = callRuntime('browser_fs_remove', 'number', ['string'], [storePath(selected.path)]);
-  if (status !== OS_STATUS_OK) appendLog(`${selected.path}: ${runtimeError()}`);
-  else appendLog(`Deleted ${selected.path}`);
+  const relative = storePath(selected.path);
+  const status = callRuntime('browser_fs_remove', 'number', ['string'], [relative]);
+  if (status !== OS_STATUS_OK) {
+    appendLog(`${selected.path}: ${runtimeError()}`);
+  } else {
+    appendLog(`Deleted ${selected.path}`);
+    forgetPath(relative).catch((error) => appendLog(`${selected.path}: still saved: ${error.message}`));
+  }
   selectedPath = '';
   renderExplorer();
 }
@@ -1286,6 +1292,104 @@ filesRun.addEventListener('click', () => {
 filesDelete.addEventListener('click', deleteSelected);
 filesAdd.addEventListener('click', () => filesInput.click());
 filesAddFolder.addEventListener('click', () => folderInput.click());
+
+/* ---------- Saved files ---------- */
+
+// The store lives in wasm memory; IndexedDB keeps a copy so /sd survives
+// reloads. Without IndexedDB (private windows, blocked storage) files stay
+// in memory only.
+const FILE_DB_NAME = 'wasm-rtos-files';
+const FILE_DB_STORE = 'files';
+let fileDbPromise = null;
+let fileStorageAvailable = true;
+
+function openFileDb() {
+  if (!fileDbPromise) {
+    fileDbPromise = new Promise((resolve) => {
+      let request;
+      try {
+        request = indexedDB.open(FILE_DB_NAME, 1);
+      } catch (error) {
+        resolve(null);
+        return;
+      }
+      request.onupgradeneeded = () => request.result.createObjectStore(FILE_DB_STORE);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    });
+  }
+  return fileDbPromise;
+}
+
+// Runs fill(store) in one transaction; resolves to its result, or rejects.
+async function withFileStore(mode, fill) {
+  const db = await openFileDb();
+  if (!db) throw new Error('browser storage is unavailable');
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(FILE_DB_STORE, mode);
+    const result = fill(transaction.objectStore(FILE_DB_STORE));
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error || new Error('storage transaction failed'));
+    transaction.onabort = () => reject(transaction.error || new Error('storage transaction aborted'));
+  });
+}
+
+function saveFile(relative, bytes) {
+  if (!fileStorageAvailable) return Promise.resolve();
+  return withFileStore('readwrite', (store) => {
+    store.put({ data: bytes, savedAt: Date.now() }, relative);
+  });
+}
+
+// Forget a file, or a folder with everything below it.
+function forgetPath(relative) {
+  if (!fileStorageAvailable) return Promise.resolve();
+  return withFileStore('readwrite', (store) => {
+    store.delete(relative);
+    store.delete(IDBKeyRange.bound(`${relative}/`, `${relative}/￿`));
+  });
+}
+
+async function loadSavedFiles() {
+  const records = {};
+  await withFileStore('readonly', (store) => {
+    const request = store.openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      records[cursor.key] = cursor.value;
+      cursor.continue();
+    };
+  });
+  return Object.entries(records)
+    .map(([relative, value]) => ({ relative, data: value.data, savedAt: value.savedAt || 0 }))
+    .sort((a, b) => a.savedAt - b.savedAt);
+}
+
+// Put saved files back into the store after the runtime starts.
+async function restoreSavedFiles() {
+  let saved;
+  try {
+    saved = await loadSavedFiles();
+  } catch (error) {
+    fileStorageAvailable = false;
+    filesFootnote.innerHTML = 'Mounted at <code>/sd</code>, like an SD card. Browser storage is unavailable: files stay until the page is closed.';
+    appendLog(`Files are not saved: ${error.message}`);
+    return;
+  }
+
+  let restored = 0;
+  for (const record of saved) {
+    try {
+      writeStoreFile(`${FS_ROOT}/${record.relative}`, new Uint8Array(record.data));
+      restored += 1;
+    } catch (error) {
+      appendLog(`${FS_ROOT}/${record.relative}: not restored: ${error.message}`);
+    }
+  }
+  if (restored) appendLog(`Restored ${restored} saved ${restored === 1 ? 'file' : 'files'} into ${FS_ROOT}`);
+}
 
 /* ---------- Loading programs ---------- */
 
@@ -1341,8 +1445,10 @@ async function importFiles(items, { run, runSingleWasm = false }) {
   for (const item of items) {
     const path = joinPath(directory, item.relativePath);
     try {
-      writeStoreFile(path, new Uint8Array(await item.file.arrayBuffer()));
+      const bytes = new Uint8Array(await item.file.arrayBuffer());
+      writeStoreFile(path, bytes);
       written.push(path);
+      saveFile(storePath(path), bytes).catch((error) => appendLog(`${path}: not saved: ${error.message}`));
     } catch (error) {
       appendLog(`${path}: ${error.message}`);
     }
@@ -1720,6 +1826,7 @@ async function initializeRuntime() {
     runtimeStatus.textContent = 'Running';
     runtimeStatusDetail.textContent = 'wasm-rtos is ready';
     appendLog(`wasm-rtos initialized · files mounted at ${FS_ROOT}`);
+    await restoreSavedFiles();
   } catch (error) {
     runtime = null;
     runtimeFailed = true;
