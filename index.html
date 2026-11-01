@@ -27,9 +27,9 @@
           <img src="wa-os-logo-horizontal.svg" alt="" width="70" height="27">
         </a>
         <div class="segmented" role="group" aria-label="Panels">
-          <button id="toggleLibrary" class="tool-button is-on" type="button" aria-pressed="true" title="Library (L)">
+          <button id="toggleLibrary" class="tool-button is-on" type="button" aria-pressed="true" title="Files and parts (L)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M7.5 3.5v13"/></svg>
-            <span class="visually-hidden">Library</span>
+            <span class="visually-hidden">Files and parts</span>
           </button>
           <button id="toggleEditor" class="tool-button is-on" type="button" aria-pressed="true" title="Editors (E)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M2.5 11.5h15"/></svg>
@@ -86,15 +86,44 @@
       </div>
     </header>
 
-    <aside id="libraryPanel" class="panel library" aria-label="Library">
+    <aside id="libraryPanel" class="panel library" aria-label="Files and parts">
       <div class="panel-header">
-        <h2>Library</h2>
+        <div class="well tabs-well panel-tabs" role="tablist" aria-label="Library">
+          <button class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="filesPane" id="filesTab">Files</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="partsPane" id="partsTab">Parts</button>
+        </div>
       </div>
-      <div class="library-search">
-        <input id="librarySearch" type="search" placeholder="Search parts" aria-label="Search parts" autocomplete="off">
+
+      <div id="filesPane" class="panel-pane" role="tabpanel" aria-labelledby="filesTab">
+        <div class="files-bar">
+          <button id="filesUp" class="icon-button" type="button" title="Up one folder" aria-label="Up one folder">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5M5.5 9.5 10 5l4.5 4.5"/></svg>
+          </button>
+          <nav id="filesPath" class="files-path" aria-label="Current folder"></nav>
+        </div>
+        <div id="filesList" class="files-list" aria-live="polite"></div>
+        <div class="files-actions">
+          <button id="filesRun" class="button files-run" type="button" disabled>Run</button>
+          <button id="filesAdd" class="icon-button" type="button" title="Add files to this folder" aria-label="Add files to this folder">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 2.5h6l3 3v12h-9z M11.5 2.5v3h3 M10 9v6 M7 12h6"/></svg>
+          </button>
+          <button id="filesAddFolder" class="icon-button" type="button" title="Add a folder to this folder" aria-label="Add a folder to this folder">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5.5h5l1.5 2h8.5v8.5h-15z M10 9.5v5 M7.5 12h5"/></svg>
+          </button>
+          <button id="filesDelete" class="icon-button" type="button" title="Delete selected" aria-label="Delete selected" disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 6h11 M8 6V4h4v2 M6 6l.8 10.5h6.4L14 6"/></svg>
+          </button>
+        </div>
+        <p class="panel-footnote">Mounted at <code>/sd</code>, like an SD card. Files stay until the page is closed.</p>
       </div>
-      <div id="libraryList" class="library-list"></div>
-      <p class="panel-footnote">Parts marked <em>planned</em> are not wired to the kernel yet.</p>
+
+      <div id="partsPane" class="panel-pane" role="tabpanel" aria-labelledby="partsTab" hidden>
+        <div class="library-search">
+          <input id="librarySearch" type="search" placeholder="Search parts" aria-label="Search parts" autocomplete="off">
+        </div>
+        <div id="libraryList" class="library-list"></div>
+        <p class="panel-footnote">Parts marked <em>planned</em> are not wired to the kernel yet.</p>
+      </div>
     </aside>
 
     <main class="workspace" id="workspace" aria-label="Board">
@@ -106,7 +135,7 @@
         <button id="zoomIn" class="hud-button" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
         <button id="zoomFit" class="hud-button" type="button" title="Fit board (F)" aria-label="Fit board">Fit</button>
       </div>
-      <div class="workspace-hint" id="workspaceHint">Scroll to zoom · drag with the wheel pressed (or Alt + drag) to pan · drop a .wasm file to run it</div>
+      <div class="workspace-hint" id="workspaceHint">Scroll to zoom · drag with the wheel pressed (or Alt + drag) to pan · drop files or folders to add them to Files</div>
     </main>
 
     <aside id="inspectorPanel" class="panel inspector" aria-label="Inspector">
@@ -178,16 +207,18 @@
   </div>
 
   <input id="wasmFile" class="visually-hidden" type="file" accept=".wasm" multiple aria-label="Choose .wasm file">
+  <input id="filesInput" class="visually-hidden" type="file" multiple aria-label="Choose files to add">
+  <input id="folderInput" class="visually-hidden" type="file" webkitdirectory multiple aria-label="Choose a folder to add">
 
   <div id="pageDropOverlay" class="page-drop-overlay" role="status" aria-live="polite" aria-hidden="true">
     <div class="page-drop-overlay-card">
-      <span class="page-drop-overlay-label">WASM program</span>
+      <span id="pageDropLabel" class="page-drop-overlay-label">Files</span>
       <svg class="page-drop-overlay-icon" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
         <path d="M32 45V15M20 27L32 15L44 27" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
         <path d="M14 42V51H50V42" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <strong>Drop to run</strong>
-      <span>Release anywhere · .wasm files only</span>
+      <strong>Drop to add</strong>
+      <span id="pageDropDetail">Release anywhere · a single .wasm also runs</span>
     </div>
   </div>
 </body>

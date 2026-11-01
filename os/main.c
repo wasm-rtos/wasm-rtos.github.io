@@ -7,6 +7,7 @@
  */
 
 #include "os/wasm-rtos/os.h"
+#include "os/wasm-rtos/fs.h"
 
 #include <emscripten/emscripten.h>
 
@@ -15,7 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define BROWSER_DEFAULT_STACK_SIZE (64U * 1024U)
 #define BROWSER_MAX_SLICES_PER_FRAME 64U
 /* Keep this aligned with the core scheduler's OS_TASK_SLICE_FUEL value. */
 #define BROWSER_FUEL_PER_SLICE 10000U
@@ -24,14 +24,14 @@
 #define BROWSER_MAX_ELAPSED_BUDGET_MS 100U
 #define BROWSER_ERROR_MESSAGE_SIZE 256U
 #define BROWSER_TRACE_EVENT_CAPACITY 4096U
+/* Dropped files appear here, like an SD card on a board. */
+#define BROWSER_FS_MOUNT "/sd"
 
 typedef struct BrowserTaskRecord
 {
     uint32_t task_id;
     uint32_t observed_run_count;
     OsTaskHandle task;
-    uint8_t* wasm_bytes;
-    char* entry_function_name;
     struct BrowserTaskRecord* next;
 } BrowserTaskRecord;
 
@@ -177,8 +177,6 @@ static void browser_remove_record(BrowserTaskRecord* target)
         if (*link == target)
         {
             *link = target->next;
-            free(target->entry_function_name);
-            free(target->wasm_bytes);
             free(target);
             return;
         }
@@ -193,8 +191,6 @@ static void browser_free_all_records(void)
     while (record != NULL)
     {
         BrowserTaskRecord* next = record->next;
-        free(record->entry_function_name);
-        free(record->wasm_bytes);
         free(record);
         record = next;
     }
@@ -223,6 +219,440 @@ static void browser_set_error(const char* operation, OsStatus status)
 static void browser_clear_error(void)
 {
     g_error_message[0] = '\0';
+}
+
+/* ---------------------------------------------------------------------------
+ * Browser file store
+ *
+ * Files the user drops into the page live in memory and are mounted at
+ * BROWSER_FS_MOUNT, so programs see them through the kernel VFS like an SD
+ * card. A program started from the store runs in place (map); a file that is
+ * replaced or removed while a reader still has it open is freed on the last
+ * close. Directories exist implicitly, as prefixes of file paths.
+ * ------------------------------------------------------------------------ */
+
+typedef struct BrowserFile
+{
+    char* path; /* relative to the mount: no leading or trailing '/' */
+    uint8_t* data;
+    uint32_t size;
+    uint32_t open_count;
+    uint8_t removed;
+    struct BrowserFile* next;
+} BrowserFile;
+
+static BrowserFile* g_files;
+
+static void browser_file_free(BrowserFile* file)
+{
+    free(file->path);
+    free(file->data);
+    free(file);
+}
+
+/* Unlink and free removed files nobody has open any more. */
+static void browser_files_collect(void)
+{
+    BrowserFile** link = &g_files;
+
+    while (*link != NULL)
+    {
+        BrowserFile* file = *link;
+        if (file->removed && file->open_count == 0U)
+        {
+            *link = file->next;
+            browser_file_free(file);
+        }
+        else
+        {
+            link = &file->next;
+        }
+    }
+}
+
+static BrowserFile* browser_file_find(const char* path)
+{
+    BrowserFile* file;
+
+    for (file = g_files; file != NULL; file = file->next)
+    {
+        if (!file->removed && strcmp(file->path, path) == 0)
+        {
+            return file;
+        }
+    }
+    return NULL;
+}
+
+/* True when path names a directory: the root, or a prefix of a file path. */
+static int browser_dir_exists(const char* path)
+{
+    size_t length = strlen(path);
+    BrowserFile* file;
+
+    if (length == 0U)
+    {
+        return 1;
+    }
+    for (file = g_files; file != NULL; file = file->next)
+    {
+        if (!file->removed && strncmp(file->path, path, length) == 0 && file->path[length] == '/')
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static OsStatus browser_fs_stat(void* context, const char* path, OsFsStat* out_stat)
+{
+    BrowserFile* file = browser_file_find(path);
+    (void)context;
+
+    if (file != NULL)
+    {
+        out_stat->type = OS_FS_TYPE_FILE;
+        out_stat->size = file->size;
+        return OS_STATUS_OK;
+    }
+    if (browser_dir_exists(path))
+    {
+        out_stat->type = OS_FS_TYPE_DIRECTORY;
+        out_stat->size = 0U;
+        return OS_STATUS_OK;
+    }
+    return OS_STATUS_FILE_NOT_FOUND;
+}
+
+static OsStatus browser_fs_open(void* context, const char* path, void** out_handle)
+{
+    BrowserFile* file = browser_file_find(path);
+    (void)context;
+
+    if (file == NULL)
+    {
+        return browser_dir_exists(path) ? OS_STATUS_IS_A_DIRECTORY : OS_STATUS_FILE_NOT_FOUND;
+    }
+    ++file->open_count;
+    *out_handle = file;
+    return OS_STATUS_OK;
+}
+
+static OsStatus browser_fs_read(
+    void* context,
+    void* handle,
+    uint64_t offset,
+    void* buffer,
+    uint32_t length,
+    uint32_t* out_read
+)
+{
+    BrowserFile* file = (BrowserFile*)handle;
+    (void)context;
+
+    *out_read = 0U;
+    if (offset >= file->size)
+    {
+        return OS_STATUS_OK;
+    }
+    if ((uint64_t)length > file->size - offset)
+    {
+        length = (uint32_t)(file->size - offset);
+    }
+    memcpy(buffer, file->data + offset, length);
+    *out_read = length;
+    return OS_STATUS_OK;
+}
+
+static void browser_fs_close(void* context, void* handle)
+{
+    BrowserFile* file = (BrowserFile*)handle;
+    (void)context;
+
+    if (file->open_count > 0U)
+    {
+        --file->open_count;
+    }
+    if (file->removed && file->open_count == 0U)
+    {
+        browser_files_collect();
+    }
+}
+
+/* Children of path in the order their files were added, each name once. */
+static OsStatus browser_fs_read_dir(void* context, const char* path, uint32_t index, OsFsDirEntry* out_entry)
+{
+    size_t path_length = strlen(path);
+    uint32_t found = 0U;
+    BrowserFile* file;
+    (void)context;
+
+    if (browser_file_find(path) != NULL)
+    {
+        return OS_STATUS_NOT_A_DIRECTORY;
+    }
+    if (!browser_dir_exists(path))
+    {
+        return OS_STATUS_FILE_NOT_FOUND;
+    }
+
+    for (file = g_files; file != NULL; file = file->next)
+    {
+        const char* rest;
+        const char* slash;
+        size_t child_length;
+        BrowserFile* earlier;
+        int duplicate = 0;
+
+        if (file->removed)
+        {
+            continue;
+        }
+        if (path_length == 0U)
+        {
+            rest = file->path;
+        }
+        else if (strncmp(file->path, path, path_length) == 0 && file->path[path_length] == '/')
+        {
+            rest = file->path + path_length + 1U;
+        }
+        else
+        {
+            continue;
+        }
+
+        slash = strchr(rest, '/');
+        child_length = slash != NULL ? (size_t)(slash - rest) : strlen(rest);
+        if (child_length > OS_FS_NAME_MAX)
+        {
+            continue;
+        }
+
+        /* Skip a child an earlier file already produced. */
+        for (earlier = g_files; earlier != file && !duplicate; earlier = earlier->next)
+        {
+            const char* earlier_rest = earlier->path + (path_length == 0U ? 0U : path_length + 1U);
+            if (earlier->removed)
+            {
+                continue;
+            }
+            if (path_length != 0U &&
+                (strncmp(earlier->path, path, path_length) != 0 || earlier->path[path_length] != '/'))
+            {
+                continue;
+            }
+            duplicate = strncmp(earlier_rest, rest, child_length) == 0 &&
+                        (earlier_rest[child_length] == '\0' || earlier_rest[child_length] == '/');
+        }
+        if (duplicate)
+        {
+            continue;
+        }
+
+        if (found == index)
+        {
+            memcpy(out_entry->name, rest, child_length);
+            out_entry->name[child_length] = '\0';
+            out_entry->type = slash != NULL ? OS_FS_TYPE_DIRECTORY : OS_FS_TYPE_FILE;
+            return OS_STATUS_OK;
+        }
+        ++found;
+    }
+    return OS_STATUS_END_OF_DIRECTORY;
+}
+
+static const uint8_t* browser_fs_map(void* context, void* handle, uint64_t* out_size)
+{
+    BrowserFile* file = (BrowserFile*)handle;
+    (void)context;
+
+    *out_size = file->size;
+    return file->data;
+}
+
+static const OsFsDriver g_browser_fs_driver = {
+    browser_fs_stat,
+    browser_fs_open,
+    browser_fs_read,
+    browser_fs_close,
+    browser_fs_read_dir,
+    browser_fs_map
+};
+
+/* A relative path of non-empty segments other than "." and "..". */
+static int browser_fs_path_is_valid(const char* path)
+{
+    const char* segment = path;
+    size_t length;
+
+    if (path == NULL || path[0] == '\0' || path[0] == '/')
+    {
+        return 0;
+    }
+    length = strlen(path);
+    if (length + sizeof(BROWSER_FS_MOUNT) + 1U > OS_FS_PATH_MAX)
+    {
+        return 0;
+    }
+    while (*segment != '\0')
+    {
+        const char* slash = strchr(segment, '/');
+        size_t segment_length = slash != NULL ? (size_t)(slash - segment) : strlen(segment);
+
+        if (segment_length == 0U || segment_length > OS_FS_NAME_MAX ||
+            (segment_length == 1U && segment[0] == '.') ||
+            (segment_length == 2U && segment[0] == '.' && segment[1] == '.'))
+        {
+            return 0;
+        }
+        if (slash == NULL)
+        {
+            break;
+        }
+        segment = slash + 1;
+    }
+    return segment[0] != '\0';
+}
+
+/* Mark every file at path, or below it when it is a directory, as removed. */
+static uint32_t browser_files_remove_path(const char* path)
+{
+    size_t length = strlen(path);
+    uint32_t removed = 0U;
+    BrowserFile* file;
+
+    for (file = g_files; file != NULL; file = file->next)
+    {
+        if (!file->removed && strncmp(file->path, path, length) == 0 &&
+            (file->path[length] == '\0' || file->path[length] == '/'))
+        {
+            file->removed = 1U;
+            ++removed;
+        }
+    }
+    browser_files_collect();
+    return removed;
+}
+
+/* Store a copy of data at path (relative to the mount), replacing a file there. */
+EMSCRIPTEN_KEEPALIVE
+int browser_fs_write(const char* path, const uint8_t* data, uint32_t size)
+{
+    BrowserFile* file;
+    BrowserFile** tail;
+    const char* slash;
+
+    if (!browser_fs_path_is_valid(path) || (data == NULL && size != 0U))
+    {
+        browser_set_error("browser_fs_write", OS_STATUS_INVALID_ARGUMENT);
+        return (int)OS_STATUS_INVALID_ARGUMENT;
+    }
+    if (browser_dir_exists(path))
+    {
+        browser_set_error("browser_fs_write", OS_STATUS_IS_A_DIRECTORY);
+        return (int)OS_STATUS_IS_A_DIRECTORY;
+    }
+    /* Every parent must be a directory, not a file. */
+    for (slash = strchr(path, '/'); slash != NULL; slash = strchr(slash + 1, '/'))
+    {
+        BrowserFile* parent;
+        for (parent = g_files; parent != NULL; parent = parent->next)
+        {
+            if (!parent->removed && strlen(parent->path) == (size_t)(slash - path) &&
+                strncmp(parent->path, path, (size_t)(slash - path)) == 0)
+            {
+                browser_set_error("browser_fs_write", OS_STATUS_NOT_A_DIRECTORY);
+                return (int)OS_STATUS_NOT_A_DIRECTORY;
+            }
+        }
+    }
+
+    file = (BrowserFile*)calloc(1U, sizeof(BrowserFile));
+    if (file != NULL)
+    {
+        file->path = browser_duplicate_string(path);
+        file->data = (uint8_t*)malloc(size != 0U ? size : 1U);
+    }
+    if (file == NULL || file->path == NULL || file->data == NULL)
+    {
+        if (file != NULL)
+        {
+            browser_file_free(file);
+        }
+        browser_set_error("browser_fs_write", OS_STATUS_OUT_OF_MEMORY);
+        return (int)OS_STATUS_OUT_OF_MEMORY;
+    }
+    if (size != 0U)
+    {
+        memcpy(file->data, data, size);
+    }
+    file->size = size;
+
+    (void)browser_files_remove_path(path);
+    for (tail = &g_files; *tail != NULL; tail = &(*tail)->next)
+    {
+    }
+    *tail = file;
+    browser_clear_error();
+    return (int)OS_STATUS_OK;
+}
+
+/* Remove a file, or a directory with everything below it. */
+EMSCRIPTEN_KEEPALIVE
+int browser_fs_remove(const char* path)
+{
+    if (!browser_fs_path_is_valid(path))
+    {
+        browser_set_error("browser_fs_remove", OS_STATUS_INVALID_ARGUMENT);
+        return (int)OS_STATUS_INVALID_ARGUMENT;
+    }
+    if (browser_files_remove_path(path) == 0U)
+    {
+        browser_set_error("browser_fs_remove", OS_STATUS_FILE_NOT_FOUND);
+        return (int)OS_STATUS_FILE_NOT_FOUND;
+    }
+    browser_clear_error();
+    return (int)OS_STATUS_OK;
+}
+
+/*
+ * Entry index of the absolute VFS directory path: writes its name and returns
+ * its OsFsType, or the negated OsStatus (END_OF_DIRECTORY ends the listing).
+ */
+EMSCRIPTEN_KEEPALIVE
+int browser_fs_list(const char* path, uint32_t index, char* out_name, uint32_t name_size)
+{
+    OsFsDirEntry entry;
+    OsStatus status;
+
+    if (path == NULL || out_name == NULL || name_size == 0U)
+    {
+        return -(int)OS_STATUS_INVALID_ARGUMENT;
+    }
+    status = os_fs_read_dir(path, index, &entry);
+    if (status != OS_STATUS_OK)
+    {
+        return -(int)status;
+    }
+    if (strlen(entry.name) >= name_size)
+    {
+        return -(int)OS_STATUS_BUFFER_TOO_SMALL;
+    }
+    memcpy(out_name, entry.name, strlen(entry.name) + 1U);
+    return (int)entry.type;
+}
+
+/* Size of the file at the absolute VFS path, or -1 when it is not a file. */
+EMSCRIPTEN_KEEPALIVE
+double browser_fs_file_size(const char* path)
+{
+    OsFsStat stat;
+
+    if (path == NULL || os_fs_stat(path, &stat) != OS_STATUS_OK || stat.type != OS_FS_TYPE_FILE)
+    {
+        return -1.0;
+    }
+    return (double)stat.size;
 }
 
 static void browser_clock_start(void)
@@ -257,6 +687,15 @@ int browser_runtime_init(void)
     if (status != OS_STATUS_OK)
     {
         browser_set_error("os_init", status);
+        browser_clock_stop();
+        return (int)status;
+    }
+
+    status = os_fs_mount(BROWSER_FS_MOUNT, &g_browser_fs_driver, NULL);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_fs_mount", status);
+        os_shutdown();
         browser_clock_stop();
         return (int)status;
     }
@@ -302,15 +741,12 @@ void browser_runtime_shutdown(void)
     g_runtime_initialized = 0;
 }
 
+/*
+ * Start the program at an absolute VFS path as a process, like an executable
+ * on a board. A program from the browser file store runs without a copy.
+ */
 EMSCRIPTEN_KEEPALIVE
-uint32_t browser_task_create(
-    const uint8_t* wasm_bytes,
-    uint32_t wasm_size,
-    const char* entry_function_name,
-    const char* task_name,
-    uint32_t stack_size,
-    uint32_t priority
-)
+uint32_t browser_task_spawn(const char* path, uint32_t priority)
 {
     BrowserTaskRecord* record;
     OsStatus status;
@@ -320,51 +756,23 @@ uint32_t browser_task_create(
         return 0U;
     }
 
-    if (wasm_bytes == NULL || wasm_size == 0U)
+    if (path == NULL || path[0] == '\0')
     {
-        browser_set_error("browser_task_create", OS_STATUS_INVALID_ARGUMENT);
+        browser_set_error("browser_task_spawn", OS_STATUS_INVALID_ARGUMENT);
         return 0U;
     }
 
     record = (BrowserTaskRecord*)calloc(1U, sizeof(BrowserTaskRecord));
     if (record == NULL)
     {
-        browser_set_error("browser_task_create", OS_STATUS_OUT_OF_MEMORY);
+        browser_set_error("browser_task_spawn", OS_STATUS_OUT_OF_MEMORY);
         return 0U;
     }
 
-    record->wasm_bytes = (uint8_t*)malloc(wasm_size);
-    record->entry_function_name = browser_duplicate_string(
-        entry_function_name != NULL && entry_function_name[0] != '\0'
-            ? entry_function_name
-            : "app_main"
-    );
-
-    if (record->wasm_bytes == NULL || record->entry_function_name == NULL)
-    {
-        free(record->entry_function_name);
-        free(record->wasm_bytes);
-        free(record);
-        browser_set_error("browser_task_create", OS_STATUS_OUT_OF_MEMORY);
-        return 0U;
-    }
-
-    memcpy(record->wasm_bytes, wasm_bytes, wasm_size);
-    status = os_task_create(
-        &record->task,
-        record->wasm_bytes,
-        wasm_size,
-        record->entry_function_name,
-        task_name,
-        stack_size == 0U ? BROWSER_DEFAULT_STACK_SIZE : stack_size,
-        priority
-    );
-
+    status = os_task_spawn_path(&record->task, path, NULL, 0U, priority);
     if (status != OS_STATUS_OK || record->task == NULL)
     {
-        browser_set_error("os_task_create", status);
-        free(record->entry_function_name);
-        free(record->wasm_bytes);
+        browser_set_error("os_task_spawn_path", status);
         free(record);
         return 0U;
     }
