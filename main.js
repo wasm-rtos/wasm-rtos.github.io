@@ -52,6 +52,13 @@ const OS_TASK_EXIT_WASM_ERROR = 4;
 const UINT32_MAX = 0xFFFFFFFF;
 const CPU_NODE_ID = 'cpu';
 
+// Browser file store, mounted by the runtime like an SD card.
+const FS_ROOT = '/sd';
+const FS_TYPE_FILE = 1;
+const FS_TYPE_DIRECTORY = 2;
+const OS_STATUS_END_OF_DIRECTORY = 29;
+const FS_NAME_BUFFER_SIZE = 256;
+
 const statusIcons = {
   Running: '▶',
   Ready: '◷',
@@ -100,6 +107,16 @@ const lcdFuel = document.querySelector('#lcdFuel');
 const lcdFuelUnit = document.querySelector('#lcdFuelUnit');
 const lcdState = document.querySelector('#lcdState');
 const libraryList = document.querySelector('#libraryList');
+const filesPath = document.querySelector('#filesPath');
+const filesList = document.querySelector('#filesList');
+const filesUp = document.querySelector('#filesUp');
+const filesRun = document.querySelector('#filesRun');
+const filesAdd = document.querySelector('#filesAdd');
+const filesAddFolder = document.querySelector('#filesAddFolder');
+const filesDelete = document.querySelector('#filesDelete');
+const filesInput = document.querySelector('#filesInput');
+const folderInput = document.querySelector('#folderInput');
+const pageDropDetail = document.querySelector('#pageDropDetail');
 const librarySearch = document.querySelector('#librarySearch');
 const editorPanel = document.querySelector('#editorPanel');
 const editorResize = document.querySelector('#editorResize');
@@ -717,15 +734,6 @@ function showTimelineTooltip(pointerEvent) {
 
 /* ---------- Tasks ---------- */
 
-async function detectEntryPoint(wasmBytes) {
-  const module = await WebAssembly.compile(wasmBytes);
-  const exports = WebAssembly.Module.exports(module).map((item) => item.name);
-  for (const candidate of ['app_main', '_start', 'main']) {
-    if (exports.includes(candidate)) return candidate;
-  }
-  throw new Error('No supported entry point found. Expected app_main, _start, or main.');
-}
-
 function stateToStatus(taskId) {
   const state = callRuntime('browser_task_get_state', 'number', ['number'], [taskId]);
   if (state === OS_TASK_READY) return 'Ready';
@@ -742,33 +750,19 @@ function stateToStatus(taskId) {
   return 'Completed';
 }
 
+// The kernel loads the program from the file system, like an executable.
 function createOsTask(task) {
   task.runCount = 0;
   task.lastRunAt = 0;
   task.activityUntil = 0;
 
-  const wasmPointer = runtime._malloc(task.wasmBytes.length);
-  if (!wasmPointer) throw new Error('Unable to allocate memory for the guest module');
-
-  let taskId = 0;
-  try {
-    runtime.HEAPU8.set(task.wasmBytes, wasmPointer);
-    taskId = callRuntime(
-      'browser_task_create',
-      'number',
-      ['number', 'number', 'string', 'string', 'number', 'number'],
-      [wasmPointer, task.wasmBytes.length, task.entryPoint, task.app, 64 * 1024, task.priority]
-    );
-  } finally {
-    runtime._free(wasmPointer);
-  }
-
+  const taskId = callRuntime('browser_task_spawn', 'number', ['string', 'number'], [task.path, task.priority]);
   if (!taskId) throw new Error(runtimeError());
   task.osTaskId = taskId;
   task.id = `task_${taskId}`;
   task.status = 'Ready';
   traceTaskOwners.set(taskId, task.localId);
-  appendLog(`Started ${task.app} as ${task.id} using ${task.entryPoint}`);
+  appendLog(`Started ${task.path} as ${task.id}`);
 }
 
 function formatLastRun(lastRunAt, now) {
@@ -865,7 +859,7 @@ function renderTasks() {
   if (!tasks.length) {
     const empty = document.createElement('p');
     empty.className = 'task-empty';
-    empty.textContent = 'No programs. Drop a .wasm file anywhere or use Load.';
+    empty.textContent = 'No programs. Run one from Files, or drop a .wasm file anywhere.';
     taskList.replaceChildren(empty);
   } else {
     taskList.replaceChildren(...tasks.map((task) => createTaskRow(task, now)));
@@ -1001,52 +995,371 @@ taskList.addEventListener('keydown', (event) => {
   }
 });
 
-/* ---------- Loading programs ---------- */
+/* ---------- Files ---------- */
 
-function openPicker() {
-  fileInput.click();
+let currentDir = FS_ROOT;
+let selectedPath = '';
+
+function joinPath(directory, name) {
+  return directory === '/' ? `/${name}` : `${directory}/${name}`;
 }
 
-async function addFile(file) {
-  if (!file.name.toLowerCase().endsWith('.wasm')) {
-    appendLog(`Rejected ${file.name}: .wasm files only`);
-    return;
+function parentPath(path) {
+  const index = path.lastIndexOf('/');
+  return index <= 0 ? '/' : path.slice(0, index);
+}
+
+function baseName(path) {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
+// Path inside the browser store for an absolute path under FS_ROOT, else ''.
+function storePath(path) {
+  return path.startsWith(`${FS_ROOT}/`) ? path.slice(FS_ROOT.length + 1) : '';
+}
+
+function isWasmPath(path) {
+  return path.toLowerCase().endsWith('.wasm');
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${fuelNumberFormat.format(bytes / 1024)} KB`;
+  return `${fuelNumberFormat.format(bytes / (1024 * 1024))} MB`;
+}
+
+// Entries of an absolute directory as the kernel VFS sees it: folders first.
+function listDirectory(directory) {
+  const entries = [];
+  const namePointer = runtime._malloc(FS_NAME_BUFFER_SIZE);
+  if (!namePointer) throw new Error('Unable to allocate a file name buffer');
+
+  try {
+    for (let index = 0; ; index += 1) {
+      const type = callRuntime(
+        'browser_fs_list',
+        'number',
+        ['string', 'number', 'number', 'number'],
+        [directory, index, namePointer, FS_NAME_BUFFER_SIZE]
+      );
+      if (type < 0) {
+        if (-type === OS_STATUS_END_OF_DIRECTORY) break;
+        throw new Error(`Cannot list ${directory} (status ${-type})`);
+      }
+      const name = runtime.UTF8ToString(namePointer);
+      const path = joinPath(directory, name);
+      const size = type === FS_TYPE_FILE
+        ? callRuntime('browser_fs_file_size', 'number', ['string'], [path])
+        : 0;
+      entries.push({ name, path, type, size });
+    }
+  } finally {
+    runtime._free(namePointer);
   }
+
+  return entries.sort((a, b) => (b.type - a.type) || a.name.localeCompare(b.name));
+}
+
+function writeStoreFile(path, bytes) {
+  const relative = storePath(path);
+  if (!relative) throw new Error(`Files can only be added under ${FS_ROOT}`);
+
+  const pointer = runtime._malloc(Math.max(1, bytes.length));
+  if (!pointer) throw new Error('Unable to allocate memory for the file');
+  try {
+    runtime.HEAPU8.set(bytes, pointer);
+    const status = callRuntime('browser_fs_write', 'number', ['string', 'number', 'number'], [relative, pointer, bytes.length]);
+    if (status !== OS_STATUS_OK) throw new Error(runtimeError());
+  } finally {
+    runtime._free(pointer);
+  }
+}
+
+function runProgram(path) {
   if (!runtime) {
-    appendLog(`Cannot start ${file.name}: runtime is still loading`);
+    appendLog(`Cannot start ${path}: runtime is still loading`);
     return;
   }
 
-  const wasmBytes = new Uint8Array(await file.arrayBuffer());
   const task = {
     localId: crypto.randomUUID(),
     id: 'pending',
-    app: file.name,
+    app: baseName(path),
+    path,
     status: 'Ready',
     priority: 5,
     osTaskId: 0,
     runCount: 0,
     lastRunAt: 0,
     activityUntil: 0,
-    traceColor: TRACE_COLORS[nextTraceColor++ % TRACE_COLORS.length],
-    wasmBytes,
-    entryPoint: await detectEntryPoint(wasmBytes)
+    traceColor: TRACE_COLORS[nextTraceColor++ % TRACE_COLORS.length]
   };
 
   try {
     createOsTask(task);
-    tasks.push(task);
   } catch (error) {
     task.status = 'Failed';
     task.id = 'not-created';
-    tasks.push(task);
-    appendLog(`${file.name}: ${error.message}`);
+    appendLog(`${path}: ${error.message}`);
   }
+  tasks.push(task);
   renderTasks();
 }
 
-function handleFiles(files) {
-  Array.from(files).forEach((file) => addFile(file).catch((error) => appendLog(`${file.name}: ${error.message}`)));
+function selectEntry(path) {
+  selectedPath = path;
+  renderExplorer();
+}
+
+function openDirectory(path) {
+  currentDir = path;
+  selectedPath = '';
+  renderExplorer();
+}
+
+function activateEntry(entry) {
+  if (entry.type === FS_TYPE_DIRECTORY) openDirectory(entry.path);
+  else if (isWasmPath(entry.path)) runProgram(entry.path);
+  else appendLog(`${entry.path}: only .wasm files can be run`);
+}
+
+function renderPath() {
+  const fragment = document.createDocumentFragment();
+  const parts = currentDir.split('/').filter(Boolean);
+  const crumb = (label, path) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'files-crumb';
+    button.textContent = label;
+    button.dataset.path = path;
+    if (path === currentDir) {
+      button.classList.add('is-current');
+      button.setAttribute('aria-current', 'location');
+    }
+    return button;
+  };
+
+  fragment.appendChild(crumb('/', '/'));
+  parts.forEach((part, index) => {
+    if (index > 0) {
+      const separator = document.createElement('span');
+      separator.className = 'files-crumb-separator';
+      separator.textContent = '/';
+      fragment.appendChild(separator);
+    }
+    fragment.appendChild(crumb(part, `/${parts.slice(0, index + 1).join('/')}`));
+  });
+  filesPath.replaceChildren(fragment);
+  filesPath.title = currentDir;
+}
+
+function createFileRow(entry) {
+  const row = document.createElement('button');
+  const icon = document.createElement('span');
+  const name = document.createElement('span');
+  const meta = document.createElement('span');
+  const isDirectory = entry.type === FS_TYPE_DIRECTORY;
+
+  row.type = 'button';
+  row.className = 'files-item';
+  row.dataset.path = entry.path;
+  row.title = isDirectory
+    ? `${entry.path} · double-click to open`
+    : `${entry.path}${isWasmPath(entry.path) ? ' · double-click to run' : ''}`;
+  if (entry.path === selectedPath) {
+    row.classList.add('is-selected');
+    row.setAttribute('aria-pressed', 'true');
+  }
+
+  icon.className = 'files-item-icon';
+  if (isDirectory) {
+    icon.classList.add('is-folder');
+    icon.textContent = 'DIR';
+  } else if (isWasmPath(entry.path)) {
+    icon.classList.add('is-wasm');
+    icon.textContent = 'WASM';
+  } else {
+    const extension = entry.name.includes('.') ? entry.name.split('.').pop() : '';
+    icon.textContent = (extension || 'FILE').slice(0, 4).toUpperCase();
+  }
+
+  name.className = 'files-item-name';
+  name.textContent = entry.name;
+  meta.className = 'files-item-meta';
+  meta.textContent = isDirectory ? '' : formatSize(entry.size);
+
+  row.append(icon, name, meta);
+  return row;
+}
+
+let explorerEntries = [];
+
+function renderExplorer() {
+  renderPath();
+  filesUp.disabled = currentDir === '/';
+
+  if (!runtime) {
+    explorerEntries = [];
+    const message = document.createElement('p');
+    message.className = 'files-empty';
+    message.textContent = runtimeFailed ? 'The runtime failed to start.' : 'Loading the runtime…';
+    filesList.replaceChildren(message);
+    filesRun.disabled = true;
+    filesDelete.disabled = true;
+    return;
+  }
+
+  try {
+    explorerEntries = listDirectory(currentDir);
+  } catch (error) {
+    // The folder disappeared (its last file was deleted): fall back to the root.
+    if (currentDir !== FS_ROOT) {
+      openDirectory(FS_ROOT);
+      return;
+    }
+    explorerEntries = [];
+    appendLog(error.message);
+  }
+
+  if (!explorerEntries.some((entry) => entry.path === selectedPath)) selectedPath = '';
+
+  if (!explorerEntries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'files-empty';
+    empty.textContent = 'Empty folder. Drop .wasm files or folders anywhere to add them here.';
+    filesList.replaceChildren(empty);
+  } else {
+    filesList.replaceChildren(...explorerEntries.map(createFileRow));
+  }
+
+  const selected = explorerEntries.find((entry) => entry.path === selectedPath);
+  filesRun.disabled = !selected || selected.type !== FS_TYPE_FILE || !isWasmPath(selected.path);
+  filesDelete.disabled = !selected || !storePath(selected.path);
+}
+
+function deleteSelected() {
+  const selected = explorerEntries.find((entry) => entry.path === selectedPath);
+  if (!selected || !storePath(selected.path)) return;
+  if (selected.type === FS_TYPE_DIRECTORY && !window.confirm(`Delete ${selected.path} and everything in it?`)) return;
+
+  const status = callRuntime('browser_fs_remove', 'number', ['string'], [storePath(selected.path)]);
+  if (status !== OS_STATUS_OK) appendLog(`${selected.path}: ${runtimeError()}`);
+  else appendLog(`Deleted ${selected.path}`);
+  selectedPath = '';
+  renderExplorer();
+}
+
+filesList.addEventListener('click', (event) => {
+  const row = event.target.closest('.files-item');
+  if (row) selectEntry(row.dataset.path);
+});
+
+filesList.addEventListener('dblclick', (event) => {
+  const row = event.target.closest('.files-item');
+  const entry = row && explorerEntries.find((item) => item.path === row.dataset.path);
+  if (entry) activateEntry(entry);
+});
+
+filesList.addEventListener('keydown', (event) => {
+  const row = event.target.closest('.files-item');
+  const entry = row && explorerEntries.find((item) => item.path === row.dataset.path);
+  if (!entry) return;
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    activateEntry(entry);
+  } else if (event.key === 'Delete' || event.key === 'Backspace') {
+    event.preventDefault();
+    selectedPath = entry.path;
+    deleteSelected();
+  }
+});
+
+filesPath.addEventListener('click', (event) => {
+  const crumb = event.target.closest('.files-crumb');
+  if (crumb && crumb.dataset.path !== currentDir) openDirectory(crumb.dataset.path);
+});
+
+filesUp.addEventListener('click', () => openDirectory(parentPath(currentDir)));
+filesRun.addEventListener('click', () => {
+  if (selectedPath) runProgram(selectedPath);
+});
+filesDelete.addEventListener('click', deleteSelected);
+filesAdd.addEventListener('click', () => filesInput.click());
+filesAddFolder.addEventListener('click', () => folderInput.click());
+
+/* ---------- Loading programs ---------- */
+
+function openPicker() {
+  fileInput.click();
+}
+
+// Where imported files land: the open folder when it is in the store.
+function importDirectory() {
+  return currentDir === FS_ROOT || storePath(currentDir) ? currentDir : FS_ROOT;
+}
+
+function fromFileList(fileList) {
+  return Array.from(fileList).map((file) => ({
+    file,
+    relativePath: file.webkitRelativePath || file.name
+  }));
+}
+
+function readEntryFile(entry) {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+function readDirectoryBatch(reader) {
+  return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+}
+
+async function collectEntry(entry, prefix, output) {
+  if (entry.isFile) {
+    output.push({ file: await readEntryFile(entry), relativePath: `${prefix}${entry.name}` });
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader();
+    // readEntries returns the children in batches until an empty one.
+    for (let batch = await readDirectoryBatch(reader); batch.length; batch = await readDirectoryBatch(reader)) {
+      for (const child of batch) await collectEntry(child, `${prefix}${entry.name}/`, output);
+    }
+  }
+}
+
+/*
+ * Copy files into the store under the open folder, keeping folder structure.
+ * With run, every imported .wasm starts; otherwise only a single dropped one.
+ */
+async function importFiles(items, { run, runSingleWasm = false }) {
+  if (!items.length) return;
+  if (!runtime) {
+    appendLog('Cannot add files: runtime is still loading');
+    return;
+  }
+
+  const directory = importDirectory();
+  const written = [];
+  for (const item of items) {
+    const path = joinPath(directory, item.relativePath);
+    try {
+      writeStoreFile(path, new Uint8Array(await item.file.arrayBuffer()));
+      written.push(path);
+    } catch (error) {
+      appendLog(`${path}: ${error.message}`);
+    }
+  }
+
+  if (written.length) {
+    appendLog(written.length === 1 ? `Added ${written[0]}` : `Added ${written.length} files to ${directory}`);
+  }
+  if (currentDir !== directory) currentDir = directory;
+  if (written.length === 1) selectedPath = written[0];
+  renderExplorer();
+
+  const programs = written.filter(isWasmPath);
+  if (run) programs.forEach(runProgram);
+  else if (runSingleWasm && items.length === 1 && !items[0].relativePath.includes('/') && programs.length === 1) {
+    runProgram(programs[0]);
+  }
 }
 
 let pageFileDragDepth = 0;
@@ -1056,6 +1369,7 @@ function dragContainsFiles(event) {
 }
 
 function setPageDropActive(active) {
+  if (active) pageDropDetail.textContent = `Into ${importDirectory()} · a single .wasm also runs`;
   pageDropOverlay.classList.toggle('is-active', active);
   pageDropOverlay.setAttribute('aria-hidden', String(!active));
 }
@@ -1089,16 +1403,43 @@ document.addEventListener('dragleave', (event) => {
 document.addEventListener('drop', (event) => {
   if (!dragContainsFiles(event)) return;
   event.preventDefault();
-  const files = event.dataTransfer.files;
   resetPageFileDrag();
-  if (files.length > 0) handleFiles(files);
+
+  // Entries must be taken before the handler returns; reading them is async.
+  const entries = Array.from(event.dataTransfer.items || [])
+    .filter((item) => item.kind === 'file')
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  const files = Array.from(event.dataTransfer.files);
+
+  (async () => {
+    let items;
+    if (entries.length) {
+      items = [];
+      for (const entry of entries) await collectEntry(entry, '', items);
+    } else {
+      items = fromFileList(files);
+    }
+    await importFiles(items, { run: false, runSingleWasm: true });
+  })().catch((error) => appendLog(`Drop failed: ${error.message}`));
 }, true);
 
 document.addEventListener('dragend', resetPageFileDrag, true);
 
 loadButton.addEventListener('click', openPicker);
 newTaskButton.addEventListener('click', openPicker);
-fileInput.addEventListener('change', () => { handleFiles(fileInput.files); fileInput.value = ''; });
+fileInput.addEventListener('change', () => {
+  importFiles(fromFileList(fileInput.files), { run: true });
+  fileInput.value = '';
+});
+filesInput.addEventListener('change', () => {
+  importFiles(fromFileList(filesInput.files), { run: false });
+  filesInput.value = '';
+});
+folderInput.addEventListener('change', () => {
+  importFiles(fromFileList(folderInput.files), { run: false });
+  folderInput.value = '';
+});
 
 /* ---------- Board, library, panels ---------- */
 
@@ -1256,6 +1597,20 @@ document.addEventListener('keydown', (event) => {
   event.preventDefault();
 });
 
+// Files / Parts tabs
+const libraryTabs = [...document.querySelectorAll('.panel-tabs .tab')];
+libraryTabs.forEach((tab) => {
+  tab.addEventListener('click', () => {
+    libraryTabs.forEach((other) => {
+      const active = other === tab;
+      other.classList.toggle('is-active', active);
+      other.setAttribute('aria-selected', String(active));
+      document.querySelector(`#${other.getAttribute('aria-controls')}`).hidden = !active;
+    });
+    if (tab.id === 'filesTab') renderExplorer();
+  });
+});
+
 // Editor tabs
 const editorTabs = [...document.querySelectorAll('.editor-tabs .tab')];
 editorTabs.forEach((tab) => {
@@ -1364,7 +1719,7 @@ async function initializeRuntime() {
     runtimeStartedAt = performance.now();
     runtimeStatus.textContent = 'Running';
     runtimeStatusDetail.textContent = 'wasm-rtos is ready';
-    appendLog('wasm-rtos initialized');
+    appendLog(`wasm-rtos initialized · files mounted at ${FS_ROOT}`);
   } catch (error) {
     runtime = null;
     runtimeFailed = true;
@@ -1374,12 +1729,14 @@ async function initializeRuntime() {
   }
   renderRunState();
   renderTasks();
+  renderExplorer();
 }
 
 createCpuNode();
 if (!Board.hasSavedView()) Board.fit();
 Board.select(CPU_NODE_ID);
 renderLibrary();
+renderExplorer();
 syncPanelsToViewport();
 
 setInterval(refreshRuntimeState, 250);

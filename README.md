@@ -4,7 +4,12 @@ Browser build of [wasm-rtos](https://github.com/wasm-rtos/wasm-rtos), served wit
 
 The kernel and its WebAssembly interpreter are compiled with Emscripten into
 `os/wasm-rtos.wasm` and the loader `os/wasm-rtos.js`. The page drives that
-runtime from `main.js`; guest `.wasm` programs dropped on the page run as tasks.
+runtime from `main.js`.
+
+Files and folders dropped on the page go into an in-memory store that the
+runtime mounts at `/sd`, like an SD card on a board. The Files panel browses
+the kernel's file system; running a `.wasm` file starts it as a process by
+path (`os_task_spawn_path`), and it runs from the store without a copy.
 
 ## Building locally
 
