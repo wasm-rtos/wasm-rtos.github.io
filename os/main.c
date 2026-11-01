@@ -3,7 +3,7 @@
  *
  * Build this file with Emscripten together with the kernel sources in
  * os/wasm-rtos and wasm3. It supplies the kernel clock port from the
- * browser's clock.
+ * browser's clock and a GPIO port for the parts drawn on the page.
  */
 
 #include "os/wasm-rtos/os.h"
@@ -26,6 +26,103 @@
 #define BROWSER_TRACE_EVENT_CAPACITY 4096U
 /* Dropped files appear here, like an SD card on a board. */
 #define BROWSER_FS_MOUNT "/sd"
+/* Pins GPIO0..GPIO7 of the simulated board. */
+#define BROWSER_GPIO_PINS 8U
+
+/*
+ * The simulated board: what the kernel configured and drove on each pin, and
+ * which pins a part on the page pulls to ground (a pressed button).
+ */
+static struct
+{
+    uint32_t flags[BROWSER_GPIO_PINS];
+    uint8_t driven[BROWSER_GPIO_PINS];
+    uint8_t grounded[BROWSER_GPIO_PINS];
+} g_board;
+
+static OsStatus browser_gpio_configure(void* context, uint32_t pin, uint32_t flags)
+{
+    (void)context;
+    if (pin >= BROWSER_GPIO_PINS)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    g_board.flags[pin] = flags;
+    if ((flags & OS_GPIO_OUTPUT) != 0U)
+    {
+        g_board.driven[pin] = (flags & OS_GPIO_INIT_HIGH) != 0U ? 1U : 0U;
+    }
+    return OS_STATUS_OK;
+}
+
+static OsStatus browser_gpio_write(void* context, uint32_t pin, uint8_t level)
+{
+    (void)context;
+    if (pin >= BROWSER_GPIO_PINS)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    g_board.driven[pin] = level ? 1U : 0U;
+    return OS_STATUS_OK;
+}
+
+/* The level on the pin: a push-pull output wins, then a part, then the pulls. */
+static uint8_t browser_gpio_level(uint32_t pin)
+{
+    uint32_t flags = g_board.flags[pin];
+
+    if ((flags & OS_GPIO_OUTPUT) != 0U && !((flags & OS_GPIO_OPEN_DRAIN) != 0U && g_board.driven[pin]))
+    {
+        return g_board.driven[pin];
+    }
+    if (g_board.grounded[pin])
+    {
+        return 0U;
+    }
+    return (flags & (OS_GPIO_PULL_UP | OS_GPIO_OPEN_DRAIN)) != 0U ? 1U : 0U;
+}
+
+static OsStatus browser_gpio_read(void* context, uint32_t pin, uint8_t* out_level)
+{
+    (void)context;
+    if (pin >= BROWSER_GPIO_PINS)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    *out_level = browser_gpio_level(pin);
+    return OS_STATUS_OK;
+}
+
+static const OsGpioPort g_browser_gpio_port =
+{
+    NULL, browser_gpio_configure, browser_gpio_write, browser_gpio_read
+};
+
+/* The board's pins, and the parts drawn on the page under their names. */
+static OsStatus browser_gpio_start(void)
+{
+    static const char* const names[BROWSER_GPIO_PINS] =
+    {
+        "gpio0", "gpio1", "gpio2", "gpio3", "gpio4", "gpio5", "gpio6", "gpio7"
+    };
+    OsStatus status = os_gpio_port_set(&g_browser_gpio_port);
+    uint32_t pin = 0U;
+
+    memset(&g_board, 0, sizeof(g_board));
+    for (pin = 0U; status == OS_STATUS_OK && pin < BROWSER_GPIO_PINS; ++pin)
+    {
+        status = os_gpio_add_pin(names[pin], pin, OS_GPIO_CAN_ALL, 0U);
+    }
+    if (status == OS_STATUS_OK)
+    {
+        status = os_gpio_add_pin("button-a", 0U, OS_GPIO_CAN_ALL, 0U);
+    }
+    if (status == OS_STATUS_OK)
+    {
+        status = os_gpio_add_pin("led", 2U, OS_GPIO_CAN_ALL, 0U);
+    }
+    return status;
+}
 
 typedef struct BrowserTaskRecord
 {
@@ -714,12 +811,48 @@ int browser_runtime_init(void)
         return (int)status;
     }
 
+    status = browser_gpio_start();
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_gpio_add_pin", status);
+        os_shutdown();
+        browser_clock_stop();
+        return (int)status;
+    }
+
     g_runtime_initialized = 1;
     g_last_budget_time_ms = g_clock_now_ms;
     g_fuel_budget = 0.0;
     g_scheduled_slice_count = 0U;
     browser_trace_reset();
     return (int)OS_STATUS_OK;
+}
+
+/* The level a part on the page sees on a pin. */
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_gpio_get_level(uint32_t pin)
+{
+    return pin < BROWSER_GPIO_PINS ? browser_gpio_level(pin) : 0U;
+}
+
+/* A part pulls a pin to ground or lets go; the change is an edge. */
+EMSCRIPTEN_KEEPALIVE
+void browser_gpio_ground(uint32_t pin, uint32_t grounded)
+{
+    uint8_t before = 0U;
+    uint8_t after = 0U;
+
+    if (pin >= BROWSER_GPIO_PINS)
+    {
+        return;
+    }
+    before = browser_gpio_level(pin);
+    g_board.grounded[pin] = grounded ? 1U : 0U;
+    after = browser_gpio_level(pin);
+    if (before != after && (g_board.flags[pin] & (OS_GPIO_EDGE_RISING | OS_GPIO_EDGE_FALLING)) != 0U)
+    {
+        os_gpio_edge(pin, after ? OS_GPIO_EDGE_RISING : OS_GPIO_EDGE_FALLING);
+    }
 }
 
 EMSCRIPTEN_KEEPALIVE

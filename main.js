@@ -69,16 +69,16 @@ const statusIcons = {
   Stopped: '■'
 };
 
-// Parts catalogue. Only the processor is wired to the kernel today.
+// Parts catalogue. The processor, the LED and the button are wired to the kernel.
 const PARTS = [
   { category: 'Processor', id: CPU_NODE_ID, name: 'WASM CPU', meta: 'wasm-rtos · wasm3', icon: 'CPU', available: true },
   { category: 'Displays', id: 'gc9a01', name: 'GC9A01', meta: 'Round TFT 240×240 · SPI', icon: 'TFT' },
   { category: 'Displays', id: 'ssd1306', name: 'SSD1306', meta: 'OLED 128×64 · I²C', icon: 'OLD' },
   { category: 'Sensors', id: 'bme280', name: 'BME280', meta: 'Temperature, humidity, pressure · I²C', icon: 'ENV' },
   { category: 'Sensors', id: 'mpu6050', name: 'MPU6050', meta: '6-axis IMU · I²C', icon: 'IMU' },
-  { category: 'Input', id: 'button', name: 'Push button', meta: 'GPIO', icon: 'BTN' },
+  { category: 'Input', id: 'button', name: 'Push button', meta: 'GPIO0 · "button-a" · to ground', icon: 'BTN', available: true },
   { category: 'Input', id: 'potentiometer', name: 'Potentiometer', meta: 'Analog', icon: 'POT' },
-  { category: 'Output', id: 'led', name: 'LED', meta: 'GPIO', icon: 'LED' },
+  { category: 'Output', id: 'led', name: 'LED', meta: 'GPIO2 · "led"', icon: 'LED', available: true },
   { category: 'Output', id: 'neopixel', name: 'RGB LED strip', meta: 'Addressable · GPIO', icon: 'RGB' }
 ];
 
@@ -525,6 +525,7 @@ function updateTimelineAccessibility(totals, totalDuration, hasVisibleEvents) {
 
 function drawSchedulerTimeline() {
   requestAnimationFrame(drawSchedulerTimeline);
+requestAnimationFrame(drawGpioParts);
   updateTimelineStatus();
   updateTraceWindow();
   if (traceRuntimeSupported) consumeTraceEvents();
@@ -1600,6 +1601,68 @@ function createCpuNode() {
   });
 }
 
+/* GPIO parts: the kernel names their pins "led" and "button-a". */
+const LED_PIN = 2;
+const BUTTON_PIN = 0;
+const partView = { led: null };
+
+function createPartNode(id, x, y, title, pinLabel, build) {
+  Board.addNode({
+    id,
+    x,
+    y,
+    width: 120,
+    height: 110,
+    pins: { right: [pinLabel], bottom: ['GND'] },
+    render(chip) {
+      const name = document.createElement('div');
+      const meta = document.createElement('div');
+      name.className = 'chip-subtitle part-title';
+      name.textContent = title;
+      meta.className = 'chip-subtitle';
+      meta.textContent = pinLabel;
+      chip.append(build(), name, meta);
+    }
+  });
+}
+
+function createGpioParts() {
+  createPartNode('led', -400, -110, 'LED', 'GPIO2', () => {
+    partView.led = document.createElement('span');
+    partView.led.className = 'part-led';
+    return partView.led;
+  });
+  createPartNode('button', -400, 30, 'BUTTON', 'GPIO0', () => {
+    const button = document.createElement('button');
+    const press = (down) => (event) => {
+      event.stopPropagation();
+      button.classList.toggle('is-pressed', down);
+      if (runtime) callRuntime('browser_gpio_ground', null, ['number', 'number'], [BUTTON_PIN, down ? 1 : 0]);
+    };
+    button.type = 'button';
+    button.className = 'part-button';
+    button.title = 'Hold to connect GPIO0 to ground';
+    button.setAttribute('aria-label', 'Push button on GPIO0');
+    button.addEventListener('pointerdown', press(true));
+    button.addEventListener('pointerup', press(false));
+    button.addEventListener('pointerleave', (event) => { if (button.classList.contains('is-pressed')) press(false)(event); });
+    button.addEventListener('keydown', (event) => {
+      if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) { event.preventDefault(); press(true)(event); }
+    });
+    button.addEventListener('keyup', (event) => {
+      if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); press(false)(event); }
+    });
+    return button;
+  });
+}
+
+function drawGpioParts() {
+  if (runtime && partView.led) {
+    partView.led.classList.toggle('is-on', callRuntime('browser_gpio_get_level', 'number', ['number'], [LED_PIN]) === 1);
+  }
+  requestAnimationFrame(drawGpioParts);
+}
+
 function renderLibrary() {
   const query = librarySearch.value.trim().toLowerCase();
   const fragment = document.createDocumentFragment();
@@ -1839,6 +1902,7 @@ async function initializeRuntime() {
 }
 
 createCpuNode();
+createGpioParts();
 if (!Board.hasSavedView()) Board.fit();
 Board.select(CPU_NODE_ID);
 renderLibrary();
