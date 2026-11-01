@@ -1,13 +1,12 @@
 /*
  * Browser entry point for wasm-rtos.
  *
- * Build this file with Emscripten together with os/wasm-rtos/os.c and
- * wasm3. Do not compile os/wasm-rtos/hal.c in the browser target because
- * this file provides the browser HAL implementation.
+ * Build this file with Emscripten together with the kernel sources in
+ * os/wasm-rtos and wasm3. It supplies the kernel clock port from the
+ * browser's clock.
  */
 
 #include "os/wasm-rtos/os.h"
-#include "os/wasm-rtos/hal.h"
 
 #include <emscripten/emscripten.h>
 
@@ -45,7 +44,7 @@ typedef struct BrowserTraceEvent
 } BrowserTraceEvent;
 
 static BrowserTaskRecord* g_task_records;
-static double g_hal_start_time_ms;
+static double g_start_time_ms;
 static uint32_t g_clock_now_ms;
 static uint32_t g_fuel_per_ms = BROWSER_DEFAULT_FUEL_PER_MS;
 static uint32_t g_last_budget_time_ms;
@@ -61,12 +60,12 @@ static double browser_elapsed_now_ms(void)
 {
     double elapsed_ms;
 
-    if (g_hal_start_time_ms == 0.0)
+    if (g_start_time_ms == 0.0)
     {
         return 0.0;
     }
 
-    elapsed_ms = emscripten_get_now() - g_hal_start_time_ms;
+    elapsed_ms = emscripten_get_now() - g_start_time_ms;
     return elapsed_ms > 0.0 ? elapsed_ms : 0.0;
 }
 
@@ -226,25 +225,19 @@ static void browser_clear_error(void)
     g_error_message[0] = '\0';
 }
 
-void hal_init(void)
+static void browser_clock_start(void)
 {
-    g_hal_start_time_ms = emscripten_get_now();
+    g_start_time_ms = emscripten_get_now();
 }
 
-void hal_shutdown(void)
+static void browser_clock_stop(void)
 {
-    g_hal_start_time_ms = 0.0;
+    g_start_time_ms = 0.0;
 }
 
-uint32_t hal_get_time_ms(void)
+static uint32_t browser_time_ms(void)
 {
     return (uint32_t)browser_elapsed_now_ms();
-}
-
-void hal_panic(const char* message)
-{
-    fprintf(stderr, "wasm-rtos panic: %s\n", message != NULL ? message : "unknown error");
-    abort();
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -259,16 +252,16 @@ int browser_runtime_init(void)
     }
 
     browser_clear_error();
-    hal_init();
+    browser_clock_start();
     status = os_init();
     if (status != OS_STATUS_OK)
     {
         browser_set_error("os_init", status);
-        hal_shutdown();
+        browser_clock_stop();
         return (int)status;
     }
 
-    g_clock_now_ms = hal_get_time_ms();
+    g_clock_now_ms = browser_time_ms();
     clock_port.now_ms = browser_clock_now_ms;
     clock_port.arm_wakeup = NULL;
     clock_port.cancel_wakeup = NULL;
@@ -278,7 +271,7 @@ int browser_runtime_init(void)
     {
         browser_set_error("os_clock_port_set", status);
         os_shutdown();
-        hal_shutdown();
+        browser_clock_stop();
         return (int)status;
     }
 
@@ -299,7 +292,7 @@ void browser_runtime_shutdown(void)
     }
 
     browser_free_all_records();
-    hal_shutdown();
+    browser_clock_stop();
     g_clock_now_ms = 0U;
     g_last_budget_time_ms = 0U;
     g_fuel_budget = 0.0;
@@ -536,7 +529,7 @@ void browser_runtime_set_slices_per_frame(uint32_t slice_count)
     }
     g_fuel_per_ms = fuel_per_ms;
     g_fuel_budget = 0.0;
-    g_last_budget_time_ms = hal_get_time_ms();
+    g_last_budget_time_ms = browser_time_ms();
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -549,7 +542,7 @@ void browser_runtime_set_fuel_per_ms(uint32_t fuel_per_ms)
 
     g_fuel_per_ms = fuel_per_ms;
     g_fuel_budget = 0.0;
-    g_last_budget_time_ms = hal_get_time_ms();
+    g_last_budget_time_ms = browser_time_ms();
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -708,7 +701,7 @@ const char* browser_runtime_get_last_error(void)
 
 static void browser_main_loop(void)
 {
-    uint32_t now_ms = hal_get_time_ms();
+    uint32_t now_ms = browser_time_ms();
     uint32_t elapsed_ms = now_ms - g_last_budget_time_ms;
     uint32_t slice_count;
     const double max_budget =

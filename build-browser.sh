@@ -19,7 +19,6 @@ required_files=(
     "os/main.c"
     "$WASM_RTOS_DIR/os.c"
     "$WASM_RTOS_DIR/os.h"
-    "$WASM_RTOS_DIR/hal.h"
 )
 
 for required_file in "${required_files[@]}"; do
@@ -34,11 +33,11 @@ if [ ! -d "$WASM3_SOURCE_DIR" ]; then
     exit 1
 fi
 
-# Every kernel source except hal.c: the browser provides its HAL in os/main.c.
+# Every kernel source; os/main.c supplies the kernel clock port.
 kernel_sources=()
 while IFS= read -r kernel_source; do
     kernel_sources+=("$kernel_source")
-done < <(find "$WASM_RTOS_DIR" -maxdepth 1 -type f -name '*.c' ! -name 'hal.c' -print | sort)
+done < <(find "$WASM_RTOS_DIR" -maxdepth 1 -type f -name '*.c' -print | sort)
 if [ "${#kernel_sources[@]}" -eq 0 ]; then
     echo "FAIL no kernel C sources found in $WASM_RTOS_DIR"
     exit 1
