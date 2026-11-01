@@ -769,7 +769,7 @@ uint32_t browser_task_spawn(const char* path, uint32_t priority)
         return 0U;
     }
 
-    status = os_task_spawn_path(&record->task, path, NULL, 0U, priority);
+    status = os_task_spawn_path(&record->task, path, NULL, 0U, priority, 0U);
     if (status != OS_STATUS_OK || record->task == NULL)
     {
         browser_set_error("os_task_spawn_path", status);
