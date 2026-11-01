@@ -10,6 +10,7 @@ Files and folders dropped on the page go into an in-memory store that the
 runtime mounts at `/sd`, like an SD card on a board. The Files panel browses
 the kernel's file system; running a `.wasm` file starts it as a process by
 path (`os_task_spawn_path`), and it runs from the store without a copy.
+IndexedDB keeps a copy of the store, so the files survive a reload.
 
 ## Building locally
 
