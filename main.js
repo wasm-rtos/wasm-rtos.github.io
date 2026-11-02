@@ -76,8 +76,9 @@ const statusIcons = {
 const PARTS = [
   { category: 'Processor', id: CPU_NODE_ID, name: 'WASM CPU', meta: 'wasm-rtos · wasm3', icon: 'CPU' },
   { category: 'Devices', id: 'watch', name: 'Watch', meta: 'Round 240×240 · bezel · 2 buttons · touch', icon: 'WCH' },
-  { category: 'Displays', id: 'gc9a01', name: 'GC9A01', meta: 'Round TFT 240×240 · SPI', icon: 'TFT' },
+  { category: 'Displays', id: 'gc9a01', name: 'GC9A01', meta: 'Round TFT 240×240 · spi0 · CS GPIO5, DC GPIO4', icon: 'TFT' },
   { category: 'Displays', id: 'ssd1306', name: 'SSD1306', meta: 'OLED 128×64 · 1-bit · "main"', icon: 'OLD' },
+  { category: 'Sensors', id: 'lm75', name: 'LM75', meta: 'Temperature · i2c0 at 0x48', icon: 'TMP' },
   { category: 'Sensors', id: 'bme280', name: 'BME280', meta: 'Temperature, humidity, pressure · I²C', icon: 'ENV' },
   { category: 'Sensors', id: 'mpu6050', name: 'MPU6050', meta: '6-axis IMU · I²C', icon: 'IMU' },
   { category: 'Input', id: 'button', name: 'Push button', meta: 'GPIO0 · "button-a" · to ground', icon: 'BTN' },
@@ -92,6 +93,7 @@ const activeBadge = document.querySelector('#activeBadge');
 const waitingCount = document.querySelector('#waitingCount');
 const timerCount = document.querySelector('#timerCount');
 const consoleLog = document.querySelector('#consoleLog');
+const busLog = document.querySelector('#busLog');
 const runtimeStatus = document.querySelector('#runtimeStatus');
 const runtimeStatusDetail = document.querySelector('#runtimeStatusDetail');
 const memoryValue = document.querySelector('#memoryValue');
@@ -1212,6 +1214,125 @@ function formatCpuTime(milliseconds) {
   return `${(milliseconds / 1000).toFixed(2)} s`;
 }
 
+/* ---------- Bus analyzer ---------- */
+
+const BUS_MAX_ROWS = 400;
+const OS_BUS_I2C = 1;
+const OS_BUS_NO_CS = 0xffffffff;
+const BUS_STATUS_NAMES = { 0: 'ok', 9: 'unsupported', 14: 'timeout', 30: 'NACK', 31: 'bus error' };
+const GC9A01_COMMANDS = {
+  0x01: 'SWRESET', 0x10: 'SLPIN', 0x11: 'SLPOUT', 0x20: 'INVOFF', 0x21: 'INVON', 0x28: 'DISPOFF', 0x29: 'DISPON',
+  0x2a: 'CASET', 0x2b: 'RASET', 0x2c: 'RAMWR', 0x36: 'MADCTL', 0x3a: 'COLMOD', 0x3c: 'RAMWRC'
+};
+const busRows = [];
+const busChipState = new Map();
+let busSequence = 0;
+let busChanged = false;
+
+const hex = (bytes) => bytes.map((byte) => byte.toString(16).padStart(2, '0')).join(' ');
+
+function busChip(kind, bus, device) {
+  return DEVICE_PROFILE.chips.find((chip) => (kind === OS_BUS_I2C
+    ? chip.type === 'lm75' && chip.address === device
+    : chip.type === 'gc9a01' && chip.cs === device) && chip.bus === bus);
+}
+
+// What a transaction means to the chip it went to.
+function decodeBus(event, chip) {
+  if (!chip || event.status !== 0 || !event.ops) return '';
+  if (chip.type === 'lm75') {
+    const registers = ['temperature', 'configuration', 'hysteresis', 'limit'];
+    const pointer = event.out.length ? event.out[0] & 3 : busChipState.get(chip) ?? 0;
+    if (event.out.length) busChipState.set(chip, pointer);
+    if (event.in.length >= 2 && pointer === 0) {
+      const raw = ((event.in[0] << 8) | event.in[1]) << 16 >> 16;
+      return `temperature ${(raw / 256).toFixed(2)} °C`;
+    }
+    return event.out.length > 1 ? `write ${registers[pointer]}` : event.in.length ? `read ${registers[pointer]}` : `select ${registers[pointer]}`;
+  }
+  const command = (event.pins >> chip.dc) & 1 ? null : event.out[0];
+  if (command !== null && command !== undefined) {
+    busChipState.set(chip, command);
+    return GC9A01_COMMANDS[command] ?? `command 0x${command.toString(16)}`;
+  }
+  const last = busChipState.get(chip);
+  if (last === 0x2c || last === 0x3c) return `pixels, ${event.written / 2} px`;
+  if ((last === 0x2a || last === 0x2b) && event.out.length >= 4) {
+    return `${last === 0x2a ? 'columns' : 'rows'} ${(event.out[0] << 8) | event.out[1]}–${(event.out[2] << 8) | event.out[3]}`;
+  }
+  return `${GC9A01_COMMANDS[last] ?? 'parameters'} ${hex(event.out)}`;
+}
+
+function readBusEvent(pointer) {
+  const view = new DataView(runtime.HEAPU8.buffer, pointer, callRuntime('browser_bus_event_size', 'number'));
+  const u32 = (offset) => view.getUint32(offset, true);
+  const written = u32(28);
+  const read = u32(32);
+  return {
+    time: view.getFloat64(0, true), task: u32(8), kind: u32(12), bus: u32(16), device: u32(20), status: view.getInt32(24, true),
+    written, read, hz: u32(36), pins: u32(40), ops: u32(44),
+    out: [...new Uint8Array(runtime.HEAPU8.buffer, pointer + 48, Math.min(16, written))],
+    in: [...new Uint8Array(runtime.HEAPU8.buffer, pointer + 64, Math.min(16, read))]
+  };
+}
+
+function busRow(event) {
+  const kind = event.kind === OS_BUS_I2C ? 'i2c' : 'spi';
+  const busName = DEVICE_PROFILE.buses.find((bus) => bus.kind === kind && bus.number === event.bus)?.name ?? `${kind}${event.bus}`;
+  const chip = busChip(event.kind, event.bus, event.device);
+  const device = event.kind === OS_BUS_I2C ? `0x${event.device.toString(16).padStart(2, '0')}`
+    : event.device === OS_BUS_NO_CS ? 'own CS' : `CS${event.device}`;
+  const more = (bytes, total) => `${hex(bytes)}${total > bytes.length ? ` … (${total} B)` : ''}`;
+  const data = [event.written ? `W ${more(event.out, event.written)}` : '', event.read ? `R ${more(event.in, event.read)}` : '']
+    .filter(Boolean).join(' → ') || (event.ops ? '' : 'address only');
+  const status = BUS_STATUS_NAMES[event.status] ?? `status ${event.status}`;
+  const meaning = decodeBus(event, chip);
+  return {
+    key: `${event.task}:${busName}:${device}`,
+    pixels: meaning.startsWith('pixels'),
+    event,
+    text: [`${(event.time / 1000).toFixed(3).padStart(9)} s`, `task_${event.task}`.padEnd(8), busName, device.padEnd(7),
+      (chip?.name ?? '').padEnd(7), data, meaning, event.status ? `! ${status}` : ''].filter(Boolean).join('  ')
+  };
+}
+
+// New transactions since the last look; pixel writes in a row fold into one line.
+function pollBus() {
+  if (!runtime || !DEVICE_PROFILE.buses.length) return;
+  const latest = callRuntime('browser_bus_get_latest_sequence', 'number');
+  if (latest === busSequence) return;
+  // The runtime keeps the last 1024; older ones are gone.
+  const first = Math.max(busSequence + 1, latest - 1023);
+  if (first > busSequence + 1) busRows.push({ key: '', text: `            … ${first - busSequence - 1} transactions not shown` });
+  for (let sequence = first; sequence <= latest; sequence += 1) {
+    const pointer = callRuntime('browser_bus_get_event', 'number', ['number'], [sequence]);
+    if (!pointer) continue;
+    const row = busRow(readBusEvent(pointer));
+    const previous = busRows[busRows.length - 1];
+    if (row.pixels && previous?.pixels && previous.key === row.key) {
+      previous.count = (previous.count ?? 1) + 1;
+      previous.bytes = (previous.bytes ?? previous.event.written) + row.event.written;
+      previous.text = previous.text.replace(/  pixels.*$/, `  pixels, ${previous.bytes / 2} px in ${previous.count} writes`);
+    } else {
+      busRows.push(row);
+    }
+  }
+  busSequence = latest;
+  if (busRows.length > BUS_MAX_ROWS) busRows.splice(0, busRows.length - BUS_MAX_ROWS);
+  busChanged = true;
+  renderBus();
+}
+
+// The pane scrolls; it follows new rows unless the reader scrolled up.
+function renderBus(follow = false) {
+  const pane = busLog.parentElement;
+  if (!busChanged || pane.hidden) return;
+  busChanged = false;
+  const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 4;
+  busLog.textContent = busRows.map((row) => row.text).join('\n');
+  if (atBottom || follow) pane.scrollTop = pane.scrollHeight;
+}
+
 /* ---------- Files ---------- */
 
 let currentDir = FS_ROOT;
@@ -1611,7 +1732,7 @@ async function restoreSavedFiles() {
 }
 
 // Example programs appear under /sd/examples on every start; they are not saved with the user's files.
-const EXAMPLES = ['watchface.wasm'];
+const EXAMPLES = ['watchface.wasm', 'i2cscan.wasm', 'thermodial.wasm'];
 
 async function addExamples() {
   for (const name of EXAMPLES) {
@@ -1864,7 +1985,18 @@ const DEVICE_PROFILES = {
     pins: [
       ...Array.from({ length: 8 }, (_, pin) => ({ name: `gpio${pin}`, pin, capabilities: GPIO_CAN_ALL })),
       { name: 'button-a', pin: 0, capabilities: GPIO_CAN_ALL },
-      { name: 'led', pin: 2, capabilities: GPIO_CAN_ALL }
+      { name: 'led', pin: 2, capabilities: GPIO_CAN_ALL },
+      { name: 'lcd-dc', pin: 4, capabilities: GPIO_CAN_ALL },
+      { name: 'lcd-cs', pin: 5, capabilities: GPIO_CAN_ALL }
+    ],
+    buses: [
+      { kind: 'i2c', name: 'i2c0', number: 0, hz: 400000 },
+      { kind: 'spi', name: 'spi0', number: 0, hz: 40000000 }
+    ],
+    // Chips on the buses, simulated byte by byte like the real parts.
+    chips: [
+      { type: 'lm75', name: 'LM75', bus: 0, address: 0x48, celsius: 22.5 },
+      { type: 'gc9a01', name: 'GC9A01', bus: 0, cs: 5, dc: 4, width: 240, height: 240 }
     ],
     displays: [
       { name: 'main', number: 0, width: 128, height: 64, round: false, format: PIXEL_MONO1, formats: [PIXEL_MONO1],
@@ -1874,12 +2006,16 @@ const DEVICE_PROFILES = {
     parts: [
       { id: 'led', type: 'led', pin: 2, title: 'LED', x: -400, y: -110 },
       { id: 'button', type: 'button', pin: 0, title: 'BUTTON', x: -400, y: 30 },
-      { id: 'ssd1306', type: 'oled', display: 0, x: 200, y: -90 }
+      { id: 'ssd1306', type: 'oled', display: 0, x: 200, y: -90 },
+      { id: 'lm75', type: 'lm75', chip: 0, x: 200, y: 150 },
+      { id: 'gc9a01', type: 'gc9a01', chip: 1, x: 560, y: -150 }
     ]
   },
   watch: {
     name: 'Watch',
     pins: [],
+    buses: [],
+    chips: [],
     displays: [
       { name: 'main', number: 0, width: 240, height: 240, round: true, format: PIXEL_RGB565,
         formats: [PIXEL_RGB565, PIXEL_XRGB8888], dpi: 260 }
@@ -1907,7 +2043,7 @@ function loadProfileId() {
 
 const deviceProfileId = loadProfileId();
 const DEVICE_PROFILE = DEVICE_PROFILES[deviceProfileId];
-const partView = { leds: [], displays: [] };
+const partView = { leds: [], displays: [], panels: [] };
 
 function applyDeviceProfile() {
   DEVICE_PROFILE.pins.forEach(({ name, pin, capabilities, options = 0 }) => {
@@ -1922,6 +2058,17 @@ function applyDeviceProfile() {
       [display.name, display.number, display.width, display.height, display.round ? 1 : 0, display.format, formats,
         display.dpi, 255, display.lit ?? 0xffffff]);
     if (status !== OS_STATUS_OK) throw new Error(`display ${display.name}: ${runtimeError()}`);
+  });
+  DEVICE_PROFILE.buses.forEach((bus) => {
+    const status = callRuntime(`browser_${bus.kind}_add_bus`, 'number', ['string', 'number', 'number'], [bus.name, bus.number, bus.hz]);
+    if (status !== OS_STATUS_OK) throw new Error(`bus ${bus.name}: ${runtimeError()}`);
+  });
+  DEVICE_PROFILE.chips.forEach((chip) => {
+    chip.runtimeId = chip.type === 'lm75'
+      ? callRuntime('browser_chip_add_lm75', 'number', ['number', 'number', 'number'], [chip.bus, chip.address, Math.round(chip.celsius * 1000)])
+      : callRuntime('browser_chip_add_gc9a01', 'number', ['number', 'number', 'number', 'number', 'number'],
+        [chip.bus, chip.cs, chip.dc, chip.width, chip.height]);
+    if (chip.runtimeId < 0) throw new Error(`chip ${chip.name}: no room`);
   });
   DEVICE_PROFILE.inputs.forEach((input) => {
     const covered = input.kind === INPUT_TOUCH ? DEVICE_PROFILE.displays[input.display] : null;
@@ -2195,12 +2342,85 @@ function bindTouch(screen, device, display) {
   screen.addEventListener('pointercancel', end);
 }
 
+// A temperature sensor on I2C; the slider is the room it sits in.
+function createLm75(part) {
+  const chip = DEVICE_PROFILE.chips[part.chip];
+  const bus = DEVICE_PROFILE.buses.find((entry) => entry.kind === 'i2c' && entry.number === chip.bus);
+  Board.addNode({
+    id: part.id,
+    x: part.x,
+    y: part.y,
+    width: 200,
+    height: 120,
+    pins: { left: ['SDA', 'SCL'], bottom: ['3V3', 'GND'] },
+    render(element) {
+      const name = document.createElement('div');
+      const meta = document.createElement('div');
+      const row = document.createElement('label');
+      const slider = document.createElement('input');
+      const value = document.createElement('output');
+      name.className = 'chip-subtitle part-title';
+      name.textContent = chip.name;
+      meta.className = 'chip-subtitle';
+      meta.textContent = `"${bus.name}" at 0x${chip.address.toString(16)}`;
+      row.className = 'part-slider';
+      slider.type = 'range';
+      slider.min = '-40';
+      slider.max = '125';
+      slider.step = '0.5';
+      slider.value = String(chip.celsius);
+      slider.setAttribute('aria-label', `${chip.name} temperature`);
+      value.textContent = `${chip.celsius.toFixed(1)} °C`;
+      slider.addEventListener('pointerdown', (event) => event.stopPropagation());
+      slider.addEventListener('input', () => {
+        chip.celsius = Number(slider.value);
+        value.textContent = `${chip.celsius.toFixed(1)} °C`;
+        if (runtime) callRuntime('browser_chip_set_temperature', null, ['number', 'number'], [chip.runtimeId, Math.round(chip.celsius * 1000)]);
+      });
+      row.append(slider, value);
+      element.append(name, meta, row);
+    }
+  });
+}
+
+// A bare round TFT on SPI: it shows what its controller's memory holds once a driver switched it on.
+function createGc9a01(part) {
+  const chip = DEVICE_PROFILE.chips[part.chip];
+  const bus = DEVICE_PROFILE.buses.find((entry) => entry.kind === 'spi' && entry.number === chip.bus);
+  const canvas = document.createElement('canvas');
+  canvas.width = chip.width;
+  canvas.height = chip.height;
+  canvas.className = 'part-screen part-screen-round part-panel';
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', `${chip.name} panel, ${chip.width}×${chip.height}`);
+  partView.panels.push({ canvas, context: canvas.getContext('2d'), chip });
+  Board.addNode({
+    id: part.id,
+    x: part.x,
+    y: part.y,
+    width: chip.width + 60,
+    height: chip.height + 80,
+    pins: { left: ['SCK', 'MOSI', 'CS', 'DC'], bottom: ['3V3', 'GND'] },
+    render(element) {
+      const name = document.createElement('div');
+      const meta = document.createElement('div');
+      name.className = 'chip-subtitle part-title';
+      name.textContent = chip.name;
+      meta.className = 'chip-subtitle';
+      meta.textContent = `"${bus.name}" · CS GPIO${chip.cs} · DC GPIO${chip.dc}`;
+      element.append(canvas, name, meta);
+    }
+  });
+}
+
 function createDeviceParts() {
   const builders = {
     led: (part) => createPartNode(part, () => createLed(part)),
     button: (part) => createPartNode(part, () => createButton(part)),
     oled: createOled,
-    watch: createWatch
+    watch: createWatch,
+    lm75: createLm75,
+    gc9a01: createGc9a01
   };
   DEVICE_PROFILE.parts.forEach((part) => builders[part.type](part));
 }
@@ -2219,6 +2439,14 @@ function drawDeviceParts() {
       context.putImageData(new ImageData(pixels, display.width, display.height), 0, 0);
       const brightness = callRuntime('browser_display_get_brightness', 'number', ['number'], [display.number]);
       canvas.style.filter = brightness >= 255 ? '' : `brightness(${(0.1 + 0.9 * brightness / 255).toFixed(2)})`;
+    });
+    partView.panels.forEach(({ canvas, context, chip }) => {
+      canvas.classList.toggle('is-off', !callRuntime('browser_chip_is_showing', 'number', ['number'], [chip.runtimeId]));
+      if (!callRuntime('browser_chip_take_dirty', 'number', ['number'], [chip.runtimeId])) return;
+      const pointer = callRuntime('browser_chip_framebuffer', 'number', ['number'], [chip.runtimeId]);
+      if (!pointer) return;
+      const pixels = new Uint8ClampedArray(runtime.HEAPU8.buffer, pointer, chip.width * chip.height * 4);
+      context.putImageData(new ImageData(pixels, chip.width, chip.height), 0, 0);
     });
   }
   requestAnimationFrame(drawDeviceParts);
@@ -2356,6 +2584,7 @@ editorTabs.forEach((tab) => {
       document.querySelector(`#${other.getAttribute('aria-controls')}`).hidden = !active;
     });
     if (tab.id === 'consoleTab') consoleLog.scrollTop = consoleLog.scrollHeight;
+    if (tab.id === 'busTab') { busChanged = true; renderBus(true); }
   });
 });
 
@@ -2487,6 +2716,7 @@ renderExplorer();
 syncPanelsToViewport();
 
 setInterval(refreshRuntimeState, 250);
+setInterval(pollBus, 200);
 setInterval(updateRuntimeClock, 1000);
 fuelRateSlider.addEventListener('input', () => setFuelRate(fuelRateSlider.value));
 fuelRateInput.addEventListener('input', () => {
