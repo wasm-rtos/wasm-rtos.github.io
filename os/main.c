@@ -3,8 +3,10 @@
  *
  * Build this file with Emscripten together with the kernel sources in
  * os/wasm-rtos and wasm3. It supplies the kernel clock port from the
- * browser's clock, a GPIO port for the parts drawn on the page, and an
- * output port that hands each program's stdout and stderr to the page.
+ * browser's clock, a GPIO port for the parts drawn on the page, a display
+ * port that paints into framebuffers the page shows, input devices the page
+ * reports to, and an output port that hands each program's stdout and stderr
+ * to the page.
  */
 
 #include "os/wasm-rtos/os.h"
@@ -29,6 +31,8 @@
 #define BROWSER_FS_MOUNT "/sd"
 /* Pins GPIO0..GPIO7 of the simulated board. */
 #define BROWSER_GPIO_PINS 8U
+/* Displays a device profile may have (OS_DISPLAY_MAX). */
+#define BROWSER_DISPLAYS 2U
 
 /*
  * The simulated board: what the kernel configured and drove on each pin, and
@@ -104,6 +108,143 @@ static OsStatus browser_gpio_start(void)
 {
     memset(&g_board, 0, sizeof(g_board));
     return os_gpio_port_set(&g_browser_gpio_port);
+}
+
+/*
+ * Displays paint into RGBA framebuffers, one per display, that the page
+ * copies to a canvas when they changed. Monochrome pixels take the panel's
+ * lit color.
+ */
+typedef struct BrowserDisplay
+{
+    uint8_t* rgba;
+    uint32_t width;
+    uint32_t height;
+    uint8_t lit[3];
+    uint8_t dirty;
+    uint8_t brightness;
+} BrowserDisplay;
+
+static BrowserDisplay g_displays[BROWSER_DISPLAYS];
+
+static void browser_display_put(BrowserDisplay* display, uint32_t index, uint32_t format, uint32_t pixel)
+{
+    uint8_t* out = display->rgba + index * 4U;
+
+    if (format == OS_DISPLAY_MONO1)
+    {
+        out[0] = pixel ? display->lit[0] : 0U;
+        out[1] = pixel ? display->lit[1] : 0U;
+        out[2] = pixel ? display->lit[2] : 0U;
+    }
+    else if (format == OS_DISPLAY_RGB565)
+    {
+        /* Widen 5 and 6 bits to 8 so white stays white. */
+        uint32_t red = (pixel >> 11U) & 0x1FU;
+        uint32_t green = (pixel >> 5U) & 0x3FU;
+        uint32_t blue = pixel & 0x1FU;
+        out[0] = (uint8_t)((red << 3U) | (red >> 2U));
+        out[1] = (uint8_t)((green << 2U) | (green >> 4U));
+        out[2] = (uint8_t)((blue << 3U) | (blue >> 2U));
+    }
+    else
+    {
+        out[0] = (uint8_t)(pixel >> 16U);
+        out[1] = (uint8_t)(pixel >> 8U);
+        out[2] = (uint8_t)pixel;
+    }
+    out[3] = 255U;
+}
+
+static OsStatus browser_display_write(void* context, uint32_t number, uint32_t x, uint32_t y, uint32_t width,
+                                      uint32_t height, uint32_t format, const void* pixels, uint32_t size)
+{
+    BrowserDisplay* display = number < BROWSER_DISPLAYS ? &g_displays[number] : NULL;
+    const uint8_t* bytes = (const uint8_t*)pixels;
+    uint32_t row_bytes = format == OS_DISPLAY_MONO1 ? (width + 7U) / 8U : 0U;
+    uint32_t row;
+    uint32_t column;
+    (void)context;
+    (void)size;
+
+    if (display == NULL || display->rgba == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    for (row = 0U; row < height; ++row)
+    {
+        for (column = 0U; column < width; ++column)
+        {
+            uint32_t pixel;
+            if (format == OS_DISPLAY_MONO1)
+            {
+                pixel = (bytes[row * row_bytes + column / 8U] >> (7U - column % 8U)) & 1U;
+            }
+            else if (format == OS_DISPLAY_RGB565)
+            {
+                const uint8_t* p = bytes + (row * width + column) * 2U;
+                pixel = (uint32_t)p[0] | ((uint32_t)p[1] << 8U);
+            }
+            else
+            {
+                const uint8_t* p = bytes + (row * width + column) * 4U;
+                pixel = (uint32_t)p[0] | ((uint32_t)p[1] << 8U) | ((uint32_t)p[2] << 16U);
+            }
+            browser_display_put(display, (y + row) * display->width + x + column, format, pixel);
+        }
+    }
+    display->dirty = 1U;
+    return OS_STATUS_OK;
+}
+
+static OsStatus browser_display_fill(void* context, uint32_t number, uint32_t x, uint32_t y, uint32_t width,
+                                     uint32_t height, uint32_t format, uint32_t color)
+{
+    BrowserDisplay* display = number < BROWSER_DISPLAYS ? &g_displays[number] : NULL;
+    uint32_t row;
+    uint32_t column;
+    (void)context;
+
+    if (display == NULL || display->rgba == NULL)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    for (row = 0U; row < height; ++row)
+    {
+        for (column = 0U; column < width; ++column)
+        {
+            browser_display_put(display, (y + row) * display->width + x + column, format, color);
+        }
+    }
+    display->dirty = 1U;
+    return OS_STATUS_OK;
+}
+
+static OsStatus browser_display_set_brightness(void* context, uint32_t number, uint8_t level)
+{
+    (void)context;
+    if (number >= BROWSER_DISPLAYS)
+    {
+        return OS_STATUS_INVALID_ARGUMENT;
+    }
+    g_displays[number].brightness = level;
+    return OS_STATUS_OK;
+}
+
+static const OsDisplayPort g_browser_display_port =
+{
+    NULL, browser_display_write, browser_display_fill, NULL, browser_display_set_brightness
+};
+
+static void browser_display_free_all(void)
+{
+    uint32_t index;
+
+    for (index = 0U; index < BROWSER_DISPLAYS; ++index)
+    {
+        free(g_displays[index].rgba);
+    }
+    memset(g_displays, 0, sizeof(g_displays));
 }
 
 /*
@@ -872,6 +1013,10 @@ int browser_runtime_init(void)
     {
         status = os_output_port_set(&g_browser_output_port);
     }
+    if (status == OS_STATUS_OK)
+    {
+        status = os_display_port_set(&g_browser_display_port);
+    }
     if (status != OS_STATUS_OK)
     {
         browser_set_error("browser_runtime_init", status);
@@ -898,6 +1043,150 @@ int browser_gpio_add_pin(const char* name, uint32_t pin, uint32_t capabilities, 
         browser_set_error("os_gpio_add_pin", status);
     }
     return (int)status;
+}
+
+/*
+ * A display of the device profile; lit is the color of a monochrome
+ * panel's pixels (0xRRGGBB).
+ */
+EMSCRIPTEN_KEEPALIVE
+int browser_display_add(const char* name, uint32_t number, uint32_t width, uint32_t height, uint32_t shape,
+                        uint32_t format, uint32_t formats, uint32_t dpi, uint32_t brightness, uint32_t lit)
+{
+    OsDisplayInfo info;
+    BrowserDisplay* display = number < BROWSER_DISPLAYS ? &g_displays[number] : NULL;
+    OsStatus status;
+
+    if (display == NULL || width == 0U || height == 0U || width > 1024U || height > 1024U)
+    {
+        browser_set_error("browser_display_add", OS_STATUS_INVALID_ARGUMENT);
+        return (int)OS_STATUS_INVALID_ARGUMENT;
+    }
+    memset(&info, 0, sizeof(info));
+    info.width = (uint16_t)width;
+    info.height = (uint16_t)height;
+    info.shape = (uint8_t)shape;
+    info.format = (uint8_t)format;
+    info.formats = formats;
+    info.dpi = (uint16_t)dpi;
+    info.has_brightness = 1U;
+    info.brightness = (uint8_t)brightness;
+    status = os_display_add(name, number, &info);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_display_add", status);
+        return (int)status;
+    }
+    free(display->rgba);
+    display->rgba = (uint8_t*)calloc((size_t)width * height, 4U);
+    if (display->rgba == NULL)
+    {
+        return (int)OS_STATUS_OUT_OF_MEMORY;
+    }
+    display->width = width;
+    display->height = height;
+    display->lit[0] = (uint8_t)(lit >> 16U);
+    display->lit[1] = (uint8_t)(lit >> 8U);
+    display->lit[2] = (uint8_t)lit;
+    display->brightness = (uint8_t)brightness;
+    display->dirty = 1U;
+    {
+        /* Opaque black until a program draws. */
+        uint32_t index;
+        for (index = 0U; index < width * height; ++index)
+        {
+            display->rgba[index * 4U + 3U] = 255U;
+        }
+    }
+    return (int)OS_STATUS_OK;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint8_t* browser_display_framebuffer(uint32_t number)
+{
+    return number < BROWSER_DISPLAYS ? g_displays[number].rgba : NULL;
+}
+
+/* Whether the framebuffer changed since the last call. */
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_display_take_dirty(uint32_t number)
+{
+    uint32_t dirty;
+
+    if (number >= BROWSER_DISPLAYS)
+    {
+        return 0U;
+    }
+    dirty = g_displays[number].dirty;
+    g_displays[number].dirty = 0U;
+    return dirty;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_display_get_brightness(uint32_t number)
+{
+    return number < BROWSER_DISPLAYS ? g_displays[number].brightness : 0U;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_display_get_owner(uint32_t number)
+{
+    return os_display_get_owner(number);
+}
+
+/* An input device of the device profile; timings in milliseconds. */
+EMSCRIPTEN_KEEPALIVE
+int browser_input_add(const char* name, uint32_t number, uint32_t kind, uint32_t width, uint32_t height,
+                      uint32_t steps_per_turn, uint32_t long_press_ms, uint32_t repeat_delay_ms,
+                      uint32_t repeat_interval_ms)
+{
+    OsInputInfo info;
+    OsStatus status;
+
+    memset(&info, 0, sizeof(info));
+    info.kind = (uint8_t)kind;
+    info.width = (uint16_t)width;
+    info.height = (uint16_t)height;
+    info.steps_per_turn = (uint16_t)steps_per_turn;
+    info.long_press_ms = (uint16_t)long_press_ms;
+    info.repeat_delay_ms = (uint16_t)repeat_delay_ms;
+    info.repeat_interval_ms = (uint16_t)repeat_interval_ms;
+    status = os_input_add(name, number, &info);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_input_add", status);
+    }
+    return (int)status;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int browser_input_key(uint32_t number, uint32_t code, uint32_t down)
+{
+    return (int)os_input_key(number, code, down ? 1U : 0U);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int browser_input_rotate(uint32_t number, uint32_t code, int32_t steps)
+{
+    return (int)os_input_rotate(number, code, steps);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int browser_input_touch(uint32_t number, uint32_t contact, uint32_t phase, uint32_t x, uint32_t y)
+{
+    return (int)os_input_touch(number, contact, phase, x, y);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int browser_input_text(uint32_t number, uint32_t code_point)
+{
+    return (int)os_input_text(number, code_point);
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_input_get_owner(uint32_t number)
+{
+    return os_input_get_owner(number);
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -942,6 +1231,7 @@ void browser_runtime_shutdown(void)
     }
 
     browser_free_all_records();
+    browser_display_free_all();
     browser_clock_stop();
     g_clock_now_ms = 0U;
     g_last_budget_time_ms = 0U;
