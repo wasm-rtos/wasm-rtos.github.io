@@ -719,6 +719,56 @@ button:disabled { cursor: default; opacity: .45; }
 .part-button.is-pressed { transform: translateY(2px); box-shadow: 0 1px 0 #111; background: radial-gradient(circle at 40% 35%, #4a4a4a, #222); }
 .part-button:focus-visible { outline: 2px solid var(--accent-select); outline-offset: 2px; }
 
+/* Displays: canvases at the panel's resolution, scaled without smoothing. */
+.part-screen { display: block; image-rendering: pixelated; background: #000; cursor: crosshair; }
+.part-screen-oled { width: 256px; height: 128px; border: 6px solid #111; border-radius: 3px; cursor: default; }
+
+/* Watch: case, turning bezel with ticks, round glass, side buttons. */
+.chip.watch-chip { gap: 10px; }
+.watch-body { position: relative; display: grid; place-items: center; }
+.watch-bezel {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(from -1deg, #9a9a9a 0 2deg, transparent 2deg calc(360deg / var(--ticks))),
+    radial-gradient(circle, transparent 61%, #1d1d1d 61.5%, #2e2e2e 72%, #1a1a1a 73%);
+  -webkit-mask: radial-gradient(circle, transparent 60%, #000 60.5%);
+  mask: radial-gradient(circle, transparent 60%, #000 60.5%);
+  box-shadow: 0 0 0 1px var(--gray-0), 0 8px 24px rgba(0, 0, 0, .6);
+  cursor: grab;
+  touch-action: none;
+}
+.watch-bezel:active { cursor: grabbing; }
+.part-screen-round { position: relative; width: 240px; height: 240px; border-radius: 50%; box-shadow: 0 0 0 4px #0b0b0b; touch-action: none; }
+.watch-buttons { position: absolute; right: 6px; top: 50%; display: flex; flex-direction: column; gap: 14px; transform: translateY(-50%); }
+.watch-key {
+  min-width: 46px;
+  padding: 6px 6px;
+  border: 1px solid var(--gray-0);
+  border-radius: 4px 10px 10px 4px;
+  background: linear-gradient(90deg, #2a2a2a, #4a4a4a);
+  color: var(--gray-9);
+  font: 600 9px var(--font-mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  box-shadow: 2px 2px 0 #111;
+  cursor: pointer;
+}
+.watch-key.is-pressed { transform: translateX(-2px); box-shadow: 0 1px 0 #111; background: linear-gradient(90deg, #222, #3a3a3a); }
+.watch-key:focus-visible { outline: 2px solid var(--accent-select); outline-offset: 2px; }
+
+.device-select {
+  width: 100%;
+  padding: 2px 4px;
+  height: 22px;
+  border: 1px solid var(--well-border);
+  border-radius: 5px;
+  background: var(--well-bg);
+  color: var(--gray-10);
+  font: inherit;
+}
+
 .pin {
   position: absolute;
   display: flex;

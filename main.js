@@ -72,15 +72,17 @@ const statusIcons = {
 };
 
 // Parts catalogue. The processor, the LED and the button are wired to the kernel.
+// The catalog; a part is on the board when the device profile places it (by id).
 const PARTS = [
-  { category: 'Processor', id: CPU_NODE_ID, name: 'WASM CPU', meta: 'wasm-rtos · wasm3', icon: 'CPU', available: true },
+  { category: 'Processor', id: CPU_NODE_ID, name: 'WASM CPU', meta: 'wasm-rtos · wasm3', icon: 'CPU' },
+  { category: 'Devices', id: 'watch', name: 'Watch', meta: 'Round 240×240 · bezel · 2 buttons · touch', icon: 'WCH' },
   { category: 'Displays', id: 'gc9a01', name: 'GC9A01', meta: 'Round TFT 240×240 · SPI', icon: 'TFT' },
-  { category: 'Displays', id: 'ssd1306', name: 'SSD1306', meta: 'OLED 128×64 · I²C', icon: 'OLD' },
+  { category: 'Displays', id: 'ssd1306', name: 'SSD1306', meta: 'OLED 128×64 · 1-bit · "main"', icon: 'OLD' },
   { category: 'Sensors', id: 'bme280', name: 'BME280', meta: 'Temperature, humidity, pressure · I²C', icon: 'ENV' },
   { category: 'Sensors', id: 'mpu6050', name: 'MPU6050', meta: '6-axis IMU · I²C', icon: 'IMU' },
-  { category: 'Input', id: 'button', name: 'Push button', meta: 'GPIO0 · "button-a" · to ground', icon: 'BTN', available: true },
+  { category: 'Input', id: 'button', name: 'Push button', meta: 'GPIO0 · "button-a" · to ground', icon: 'BTN' },
   { category: 'Input', id: 'potentiometer', name: 'Potentiometer', meta: 'Analog', icon: 'POT' },
-  { category: 'Output', id: 'led', name: 'LED', meta: 'GPIO2 · "led"', icon: 'LED', available: true },
+  { category: 'Output', id: 'led', name: 'LED', meta: 'GPIO2 · "led"', icon: 'LED' },
   { category: 'Output', id: 'neopixel', name: 'RGB LED strip', meta: 'Addressable · GPIO', icon: 'RGB' }
 ];
 
@@ -93,7 +95,7 @@ const consoleLog = document.querySelector('#consoleLog');
 const runtimeStatus = document.querySelector('#runtimeStatus');
 const runtimeStatusDetail = document.querySelector('#runtimeStatusDetail');
 const memoryValue = document.querySelector('#memoryValue');
-const deviceValue = document.querySelector('#deviceValue');
+const deviceSelect = document.querySelector('#deviceSelect');
 const programSection = document.querySelector('#programSection');
 const programTitle = document.querySelector('#programTitle');
 const programProps = document.querySelector('#programProps');
@@ -583,7 +585,7 @@ function updateTimelineAccessibility(totals, totalDuration, hasVisibleEvents) {
 
 function drawSchedulerTimeline() {
   requestAnimationFrame(drawSchedulerTimeline);
-requestAnimationFrame(drawGpioParts);
+requestAnimationFrame(drawDeviceParts);
   updateTimelineStatus();
   updateTraceWindow();
   if (traceRuntimeSupported) consumeTraceEvents();
@@ -1125,6 +1127,15 @@ function ownedPins(taskId) {
     .map((pin) => `GPIO${pin} (${pinNames(pin).filter((name) => name !== `gpio${pin}`).join(', ') || `gpio${pin}`})`);
 }
 
+// Displays and input devices a task owns, by name.
+function ownedDevices(taskId) {
+  const owned = (call, entry) => callRuntime(call, 'number', ['number'], [entry.number]) === taskId;
+  return [
+    ...DEVICE_PROFILE.displays.filter((entry) => owned('browser_display_get_owner', entry)).map((entry) => `display "${entry.name}"`),
+    ...DEVICE_PROFILE.inputs.filter((entry) => owned('browser_input_get_owner', entry)).map((entry) => `"${entry.name}"`)
+  ];
+}
+
 function renderProgram() {
   const task = tasks.find((entry) => entry.localId === selectedTaskId);
   programSection.hidden = !task;
@@ -1164,7 +1175,9 @@ function renderProgram() {
   }
   if (task.osTaskId) {
     const pins = ownedPins(task.osTaskId);
-    add('Pins', pins.length ? pins.join(', ') : 'none');
+    const devices = ownedDevices(task.osTaskId);
+    if (DEVICE_PROFILE.pins.length) add('Pins', pins.length ? pins.join(', ') : 'none');
+    if (devices.length) add('Devices', devices.join(', '));
   }
 
   programProps.replaceChildren(...rows.flatMap(([label, value]) => {
@@ -1597,6 +1610,22 @@ async function restoreSavedFiles() {
   if (restored) appendLog(`Restored ${restored} saved ${restored === 1 ? 'file' : 'files'} into ${FS_ROOT}`);
 }
 
+// Example programs appear under /sd/examples on every start; they are not saved with the user's files.
+const EXAMPLES = ['watchface.wasm'];
+
+async function addExamples() {
+  for (const name of EXAMPLES) {
+    try {
+      const response = await fetch(`examples/${name}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      writeStoreFile(`${FS_ROOT}/examples/${name}`, new Uint8Array(await response.arrayBuffer()));
+    } catch (error) {
+      appendLog(`examples/${name}: not added: ${error.message}`);
+    }
+  }
+  renderExplorer();
+}
+
 /* ---------- Loading programs ---------- */
 
 function openPicker() {
@@ -1808,24 +1837,77 @@ function createCpuNode() {
 }
 
 /*
- * The simulated device, as data: the pins the kernel lends to programs and
- * the parts wired to them. A program asks for "led" and gets GPIO2 here, and
- * whatever pin another profile names "led".
+ * Simulated devices, as data: the pins, displays and input devices the
+ * kernel lends to programs, under the names programs open them by, and the
+ * parts drawn on the board. A program asks for "main" and gets whatever
+ * display the device has, and learns its size and shape from the kernel.
  */
 const GPIO_CAN_ALL = 0x3f;
-const DEVICE_PROFILE = {
-  name: 'Dev board',
-  pins: [
-    ...Array.from({ length: 8 }, (_, pin) => ({ name: `gpio${pin}`, pin, capabilities: GPIO_CAN_ALL })),
-    { name: 'button-a', pin: 0, capabilities: GPIO_CAN_ALL },
-    { name: 'led', pin: 2, capabilities: GPIO_CAN_ALL }
-  ],
-  parts: [
-    { id: 'led', type: 'led', pin: 2, title: 'LED', x: -400, y: -110 },
-    { id: 'button', type: 'button', pin: 0, title: 'BUTTON', x: -400, y: 30 }
-  ]
+const PIXEL_MONO1 = 1;
+const PIXEL_RGB565 = 2;
+const PIXEL_XRGB8888 = 3;
+const INPUT_BUTTONS = 1;
+const INPUT_ROTARY = 2;
+const INPUT_TOUCH = 3;
+const TOUCH_UP = 0;
+const TOUCH_DOWN = 1;
+const TOUCH_MOVE = 2;
+// Linux input event codes.
+const KEY_BACK = 158;
+const KEY_SELECT = 0x161;
+const REL_DIAL = 7;
+const PROFILE_STORAGE_KEY = 'wasm-rtos.device';
+
+const DEVICE_PROFILES = {
+  devboard: {
+    name: 'Dev board',
+    pins: [
+      ...Array.from({ length: 8 }, (_, pin) => ({ name: `gpio${pin}`, pin, capabilities: GPIO_CAN_ALL })),
+      { name: 'button-a', pin: 0, capabilities: GPIO_CAN_ALL },
+      { name: 'led', pin: 2, capabilities: GPIO_CAN_ALL }
+    ],
+    displays: [
+      { name: 'main', number: 0, width: 128, height: 64, round: false, format: PIXEL_MONO1, formats: [PIXEL_MONO1],
+        dpi: 140, lit: 0x9fd7ff }
+    ],
+    inputs: [],
+    parts: [
+      { id: 'led', type: 'led', pin: 2, title: 'LED', x: -400, y: -110 },
+      { id: 'button', type: 'button', pin: 0, title: 'BUTTON', x: -400, y: 30 },
+      { id: 'ssd1306', type: 'oled', display: 0, x: 200, y: -90 }
+    ]
+  },
+  watch: {
+    name: 'Watch',
+    pins: [],
+    displays: [
+      { name: 'main', number: 0, width: 240, height: 240, round: true, format: PIXEL_RGB565,
+        formats: [PIXEL_RGB565, PIXEL_XRGB8888], dpi: 260 }
+    ],
+    inputs: [
+      { name: 'bezel', number: 0, kind: INPUT_ROTARY, stepsPerTurn: 24 },
+      { name: 'buttons', number: 1, kind: INPUT_BUTTONS, longPressMs: 600 },
+      { name: 'touch', number: 2, kind: INPUT_TOUCH, display: 0 }
+    ],
+    parts: [
+      { id: 'watch', type: 'watch', display: 0, bezel: 0, buttons: 1, touch: 2, x: 200, y: -190,
+        keys: [{ code: KEY_SELECT, label: 'Select', title: 'KEY_SELECT, the crown' }, { code: KEY_BACK, label: 'Back', title: 'KEY_BACK' }] }
+    ]
+  }
 };
-const partView = { leds: [] };
+
+function loadProfileId() {
+  try {
+    const id = localStorage.getItem(PROFILE_STORAGE_KEY);
+    return id in DEVICE_PROFILES ? id : 'devboard';
+  } catch (error) {
+    return 'devboard';
+  }
+}
+
+const deviceProfileId = loadProfileId();
+const DEVICE_PROFILE = DEVICE_PROFILES[deviceProfileId];
+const partView = { leds: [], displays: [] };
 
 function applyDeviceProfile() {
   DEVICE_PROFILE.pins.forEach(({ name, pin, capabilities, options = 0 }) => {
@@ -1833,8 +1915,50 @@ function applyDeviceProfile() {
       [name, pin, capabilities, options]);
     if (status !== OS_STATUS_OK) throw new Error(`pin ${name}: ${runtimeError()}`);
   });
-  deviceValue.textContent = DEVICE_PROFILE.name;
+  DEVICE_PROFILE.displays.forEach((display) => {
+    const formats = display.formats.reduce((mask, format) => mask | (1 << format), 0);
+    const status = callRuntime('browser_display_add', 'number',
+      ['string', 'number', 'number', 'number', 'number', 'number', 'number', 'number', 'number', 'number'],
+      [display.name, display.number, display.width, display.height, display.round ? 1 : 0, display.format, formats,
+        display.dpi, 255, display.lit ?? 0xffffff]);
+    if (status !== OS_STATUS_OK) throw new Error(`display ${display.name}: ${runtimeError()}`);
+  });
+  DEVICE_PROFILE.inputs.forEach((input) => {
+    const covered = input.kind === INPUT_TOUCH ? DEVICE_PROFILE.displays[input.display] : null;
+    const status = callRuntime('browser_input_add', 'number',
+      ['string', 'number', 'number', 'number', 'number', 'number', 'number', 'number', 'number'],
+      [input.name, input.number, input.kind, covered?.width ?? 0, covered?.height ?? 0, input.stepsPerTurn ?? 0,
+        input.longPressMs ?? 0, input.repeatDelayMs ?? 0, input.repeatIntervalMs ?? 0]);
+    if (status !== OS_STATUS_OK) throw new Error(`input ${input.name}: ${runtimeError()}`);
+  });
 }
+
+// Picking another device restarts the simulator with it, like booting other hardware.
+function renderDevicePicker() {
+  deviceSelect.replaceChildren(...Object.entries(DEVICE_PROFILES).map(([id, profile]) => {
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = profile.name;
+    option.selected = id === deviceProfileId;
+    return option;
+  }));
+}
+
+deviceSelect.addEventListener('change', () => {
+  const running = tasks.some((task) => !['Completed', 'Failed', 'Stopped'].includes(task.status));
+  if (running && !window.confirm(`Switch to ${DEVICE_PROFILES[deviceSelect.value].name}? Running programs stop.`)) {
+    deviceSelect.value = deviceProfileId;
+    return;
+  }
+  try {
+    localStorage.setItem(PROFILE_STORAGE_KEY, deviceSelect.value);
+  } catch (error) {
+    appendLog('The device choice cannot be saved in this browser');
+    deviceSelect.value = deviceProfileId;
+    return;
+  }
+  window.location.reload();
+});
 
 // The names a program may open a pin by.
 function pinNames(pin) {
@@ -1892,18 +2016,216 @@ function createButton(part) {
   return button;
 }
 
-function createGpioParts() {
-  const builders = { led: createLed, button: createButton };
-  DEVICE_PROFILE.parts.forEach((part) => createPartNode(part, () => builders[part.type](part)));
+// A canvas at the display's own resolution; the runtime paints its framebuffer into it.
+function createScreen(display, className) {
+  const canvas = document.createElement('canvas');
+  canvas.width = display.width;
+  canvas.height = display.height;
+  canvas.className = className;
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', `Display "${display.name}", ${display.width}×${display.height}`);
+  partView.displays.push({ canvas, context: canvas.getContext('2d'), display });
+  return canvas;
 }
 
-function drawGpioParts() {
+function createOled(part) {
+  const display = DEVICE_PROFILE.displays[part.display];
+  Board.addNode({
+    id: part.id,
+    x: part.x,
+    y: part.y,
+    width: display.width * 2 + 40,
+    height: display.height * 2 + 70,
+    pins: { left: ['SDA', 'SCL'], bottom: ['3V3', 'GND'] },
+    render(chip) {
+      const name = document.createElement('div');
+      const meta = document.createElement('div');
+      name.className = 'chip-subtitle part-title';
+      name.textContent = 'OLED';
+      meta.className = 'chip-subtitle';
+      meta.textContent = `"${display.name}" · ${display.width}×${display.height} · 1-bit`;
+      chip.append(createScreen(display, 'part-screen part-screen-oled'), name, meta);
+    }
+  });
+}
+
+/*
+ * A watch: the round display, a bezel around it (scroll over it, or drag it
+ * around), side buttons, and touch on the glass.
+ */
+function createWatch(part) {
+  const display = DEVICE_PROFILE.displays[part.display];
+  const bezelInput = DEVICE_PROFILE.inputs[part.bezel];
+  const size = display.width + 80;
+  Board.addNode({
+    id: part.id,
+    x: part.x,
+    y: part.y,
+    width: size + 100,
+    height: size + 60,
+    render(chip) {
+      const body = document.createElement('div');
+      const bezel = document.createElement('div');
+      const screen = createScreen(display, 'part-screen part-screen-round');
+      const buttons = document.createElement('div');
+      const meta = document.createElement('div');
+
+      chip.classList.add('watch-chip');
+      body.className = 'watch-body';
+      body.style.width = `${size}px`;
+      body.style.height = `${size}px`;
+      bezel.className = 'watch-bezel';
+      bezel.title = `Bezel "${bezelInput.name}": scroll or drag around · ${bezelInput.stepsPerTurn} steps a turn`;
+      bezel.style.setProperty('--ticks', bezelInput.stepsPerTurn);
+      buttons.className = 'watch-buttons';
+      meta.className = 'chip-subtitle';
+      meta.textContent = `"${display.name}" round ${display.width}×${display.height} · "bezel" · "buttons" · "touch"`;
+
+      part.keys.forEach((key) => buttons.appendChild(createWatchKey(part, key)));
+      bindBezel(bezel, part.bezel, bezelInput.stepsPerTurn);
+      bindTouch(screen, part.touch, display);
+      body.append(bezel, screen);
+      chip.append(body, buttons, meta);
+    }
+  });
+}
+
+function inputCall(name, argumentsList) {
+  if (runtime) callRuntime(name, 'number', argumentsList.map(() => 'number'), argumentsList);
+}
+
+function createWatchKey(part, key) {
+  const button = document.createElement('button');
+  const press = (down) => (event) => {
+    event.stopPropagation();
+    if (down === button.classList.contains('is-pressed')) return;
+    button.classList.toggle('is-pressed', down);
+    inputCall('browser_input_key', [part.buttons, key.code, down ? 1 : 0]);
+  };
+  button.type = 'button';
+  button.className = 'watch-key';
+  button.textContent = key.label;
+  button.title = `${key.title} on "buttons"; hold for a long press`;
+  button.addEventListener('pointerdown', press(true));
+  button.addEventListener('pointerup', press(false));
+  button.addEventListener('pointerleave', press(false));
+  button.addEventListener('keydown', (event) => {
+    if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) { event.preventDefault(); press(true)(event); }
+  });
+  button.addEventListener('keyup', (event) => {
+    if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); press(false)(event); }
+  });
+  return button;
+}
+
+function bindBezel(bezel, device, stepsPerTurn) {
+  let angle = 0;
+  let wheelRest = 0;
+  let drag = null;
+  const turn = (steps) => {
+    if (!steps) return;
+    angle += steps * 360 / stepsPerTurn;
+    bezel.style.transform = `rotate(${angle}deg)`;
+    inputCall('browser_input_rotate', [device, REL_DIAL, steps]);
+  };
+  const pointerAngle = (event) => {
+    const rect = bezel.getBoundingClientRect();
+    return Math.atan2(event.clientY - rect.top - rect.height / 2, event.clientX - rect.left - rect.width / 2) * 180 / Math.PI;
+  };
+
+  // One wheel notch is one detent, scrolling down turns clockwise.
+  bezel.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    wheelRest += event.deltaMode === 1 ? event.deltaY * 33 : event.deltaY;
+    const steps = Math.trunc(wheelRest / 50);
+    wheelRest -= steps * 50;
+    turn(steps);
+  }, { passive: false });
+  bezel.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    bezel.setPointerCapture(event.pointerId);
+    drag = { last: pointerAngle(event), rest: 0 };
+  });
+  bezel.addEventListener('pointermove', (event) => {
+    if (!drag) return;
+    let delta = pointerAngle(event) - drag.last;
+    if (delta > 180) delta -= 360;
+    if (delta < -180) delta += 360;
+    drag.last += delta;
+    drag.rest += delta;
+    const steps = Math.trunc(drag.rest / (360 / stepsPerTurn));
+    drag.rest -= steps * 360 / stepsPerTurn;
+    turn(steps);
+  });
+  const end = () => { drag = null; };
+  bezel.addEventListener('pointerup', end);
+  bezel.addEventListener('pointercancel', end);
+}
+
+// Touch in display pixels; outside the round glass nothing is touched.
+function bindTouch(screen, device, display) {
+  let down = false;
+  const point = (event) => {
+    const rect = screen.getBoundingClientRect();
+    const x = Math.floor((event.clientX - rect.left) / rect.width * display.width);
+    const y = Math.floor((event.clientY - rect.top) / rect.height * display.height);
+    return [Math.min(display.width - 1, Math.max(0, x)), Math.min(display.height - 1, Math.max(0, y))];
+  };
+  const onGlass = ([x, y]) => !display.round ||
+    (x - display.width / 2) ** 2 / (display.width / 2) ** 2 + (y - display.height / 2) ** 2 / (display.height / 2) ** 2 <= 1;
+
+  screen.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || !onGlass(point(event))) return;
+    event.stopPropagation();
+    screen.setPointerCapture(event.pointerId);
+    down = true;
+    inputCall('browser_input_touch', [device, 0, TOUCH_DOWN, ...point(event)]);
+  });
+  screen.addEventListener('pointermove', (event) => {
+    if (down) inputCall('browser_input_touch', [device, 0, TOUCH_MOVE, ...point(event)]);
+  });
+  const end = (event) => {
+    if (!down) return;
+    down = false;
+    inputCall('browser_input_touch', [device, 0, TOUCH_UP, ...point(event)]);
+  };
+  screen.addEventListener('pointerup', end);
+  screen.addEventListener('pointercancel', end);
+}
+
+function createDeviceParts() {
+  const builders = {
+    led: (part) => createPartNode(part, () => createLed(part)),
+    button: (part) => createPartNode(part, () => createButton(part)),
+    oled: createOled,
+    watch: createWatch
+  };
+  DEVICE_PROFILE.parts.forEach((part) => builders[part.type](part));
+}
+
+// LEDs follow their pins; screens repaint when the runtime drew on them.
+function drawDeviceParts() {
   if (runtime) {
     partView.leds.forEach(({ element, pin }) => {
       element.classList.toggle('is-on', callRuntime('browser_gpio_get_level', 'number', ['number'], [pin]) === 1);
     });
+    partView.displays.forEach(({ canvas, context, display }) => {
+      if (!callRuntime('browser_display_take_dirty', 'number', ['number'], [display.number])) return;
+      const pointer = callRuntime('browser_display_framebuffer', 'number', ['number'], [display.number]);
+      if (!pointer) return;
+      const pixels = new Uint8ClampedArray(runtime.HEAPU8.buffer, pointer, display.width * display.height * 4);
+      context.putImageData(new ImageData(pixels, display.width, display.height), 0, 0);
+      const brightness = callRuntime('browser_display_get_brightness', 'number', ['number'], [display.number]);
+      canvas.style.filter = brightness >= 255 ? '' : `brightness(${(0.1 + 0.9 * brightness / 255).toFixed(2)})`;
+    });
   }
-  requestAnimationFrame(drawGpioParts);
+  requestAnimationFrame(drawDeviceParts);
+}
+
+function isPlaced(part) {
+  return part.id === CPU_NODE_ID || DEVICE_PROFILE.parts.some((entry) => entry.id === part.id);
 }
 
 function renderLibrary() {
@@ -1931,7 +2253,8 @@ function renderLibrary() {
 
       item.type = 'button';
       item.className = 'library-item';
-      item.disabled = !part.available;
+      const placed = isPlaced(part);
+      item.disabled = !placed;
       item.dataset.partId = part.id;
       if (part.id === Board.getSelected()) item.classList.add('is-selected');
       icon.className = 'library-item-icon';
@@ -1941,8 +2264,8 @@ function renderLibrary() {
       name.textContent = part.name;
       meta.className = 'library-item-meta';
       meta.textContent = part.meta;
-      tag.className = part.available ? 'library-item-tag is-placed' : 'library-item-tag';
-      tag.textContent = part.available ? 'on board' : 'planned';
+      tag.className = placed ? 'library-item-tag is-placed' : 'library-item-tag';
+      tag.textContent = placed ? 'on board' : 'planned';
 
       text.append(name, meta);
       item.append(icon, text, tag);
@@ -2139,8 +2462,9 @@ async function initializeRuntime() {
     runtimeStartedAt = performance.now();
     runtimeStatus.textContent = 'Running';
     runtimeStatusDetail.textContent = 'wasm-rtos is ready';
-    appendLog(`wasm-rtos initialized · files mounted at ${FS_ROOT}`);
+    appendLog(`wasm-rtos initialized · ${DEVICE_PROFILE.name} · files mounted at ${FS_ROOT}`);
     await restoreSavedFiles();
+    await addExamples();
   } catch (error) {
     runtime = null;
     runtimeFailed = true;
@@ -2154,7 +2478,8 @@ async function initializeRuntime() {
 }
 
 createCpuNode();
-createGpioParts();
+renderDevicePicker();
+createDeviceParts();
 if (!Board.hasSavedView()) Board.fit();
 Board.select(CPU_NODE_ID);
 renderLibrary();

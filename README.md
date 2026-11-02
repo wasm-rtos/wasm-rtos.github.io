@@ -12,15 +12,33 @@ the kernel's file system; running a `.wasm` file starts it as a process by
 path (`os_task_spawn_path`), and it runs from the store without a copy.
 IndexedDB keeps a copy of the store, so the files survive a reload.
 
-The simulated device is described as data in `main.js` (`DEVICE_PROFILE`):
-the pins the kernel lends to programs, under the names programs open them by
-(`"led"`, `"button-a"`, `gpio0`…`gpio7`), and the parts wired to them. The
-runtime's GPIO port reports what programs drive and what the parts on the
-board do, such as a pressed button.
+Simulated devices are described as data in `main.js` (`DEVICE_PROFILES`),
+and the Device menu in the Inspector picks one (switching restarts the
+simulator). A profile lists the pins, displays and input devices the kernel
+lends to programs, under the names programs open them by, and the parts
+drawn for them:
+
+- **Dev board**: an LED (`"led"`, GPIO2), a push button (`"button-a"`,
+  GPIO0), `gpio0`…`gpio7`, and a 128×64 1-bit OLED as display `"main"`.
+- **Watch**: a round 240×240 RGB565 display `"main"`, a bezel (`"bezel"`,
+  24 detents a turn: scroll over it or drag it around), two buttons
+  (`"buttons"`: Select and Back, long press at 600 ms) and touch on the glass
+  (`"touch"`).
+
+The runtime's GPIO port reports what programs drive and what the parts do;
+its display port paints into framebuffers the page shows; the page reports
+bezel turns, button presses and touches to the kernel's input devices.
+
+`examples/` holds programs that appear under `/sd/examples` on every start.
+`watchface.wasm` runs on every profile: it asks the display for its size,
+shape and format and uses whatever inputs the device has. Rebuild it with
+`clang --target=wasm32-wasip1 --sysroot=<wasi-sysroot> -Ios/wasm-rtos/include
+-O2 -o examples/watchface.wasm examples/watchface.c`.
 
 Selecting a program in Tasks shows it in the Inspector: its name from its
 metadata, state, memory by kind (linear memory, stack and how much of it was
-used, compiled code, kernel), the pins it owns, and, when it failed, why and
+used, compiled code, kernel), the pins, displays and input devices it owns,
+and, when it failed, why and
 in which functions. It also shows the fuel the program has spent (the
 interpreter's work count, the same on every device), the browser time its
 slices took, and its own output. The Console shows every program's stdout
