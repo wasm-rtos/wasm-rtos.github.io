@@ -33,7 +33,7 @@ static void command(uint8_t code, const uint8_t* parameters, uint32_t count)
 static void panel_init(void)
 {
     static const uint8_t pixel_format = 0x05;  /* 16 bits per pixel */
-    static const uint8_t address_mode = 0x08;  /* BGR, as these modules are wired */
+    static const uint8_t address_mode = 0x48;  /* MX | BGR: upright, as these modules are wired */
     command(0x01, 0, 0);                       /* software reset */
     wr_sleep_ms(120);
     command(0x11, 0, 0);                       /* out of sleep */

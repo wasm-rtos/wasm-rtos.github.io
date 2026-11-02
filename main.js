@@ -196,7 +196,9 @@ function flushProgramOutput(taskId) {
   });
 }
 
-function addProgramLine(taskId, fd, line) {
+function addProgramLine(taskId, fd, rawLine) {
+  // Arduino sketches end lines with \r\n.
+  const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
   const task = tasks.find((entry) => entry.osTaskId === taskId);
   const label = task ? task.id : `task_${taskId}`;
   appendLog(fd === 2 ? `${label} stderr: ${line}` : `${label}: ${line}`);
@@ -1231,10 +1233,12 @@ let busChanged = false;
 
 const hex = (bytes) => bytes.map((byte) => byte.toString(16).padStart(2, '0')).join(' ');
 
-function busChip(kind, bus, device) {
-  return DEVICE_PROFILE.chips.find((chip) => (kind === OS_BUS_I2C
+// The chip a transaction went to: by address, by the kernel's chip select, or, when the
+// program drives chip select itself, by whichever chip select pin was low.
+function busChip(kind, bus, device, pins) {
+  return DEVICE_PROFILE.chips.find((chip) => chip.bus === bus && (kind === OS_BUS_I2C
     ? chip.type === 'lm75' && chip.address === device
-    : chip.type === 'gc9a01' && chip.cs === device) && chip.bus === bus);
+    : chip.type === 'gc9a01' && (device === OS_BUS_NO_CS ? ((pins >> chip.cs) & 1) === 0 : chip.cs === device)));
 }
 
 // What a transaction means to the chip it went to.
@@ -1279,7 +1283,7 @@ function readBusEvent(pointer) {
 function busRow(event) {
   const kind = event.kind === OS_BUS_I2C ? 'i2c' : 'spi';
   const busName = DEVICE_PROFILE.buses.find((bus) => bus.kind === kind && bus.number === event.bus)?.name ?? `${kind}${event.bus}`;
-  const chip = busChip(event.kind, event.bus, event.device);
+  const chip = busChip(event.kind, event.bus, event.device, event.pins);
   const device = event.kind === OS_BUS_I2C ? `0x${event.device.toString(16).padStart(2, '0')}`
     : event.device === OS_BUS_NO_CS ? 'own CS' : `CS${event.device}`;
   const more = (bytes, total) => `${hex(bytes)}${total > bytes.length ? ` … (${total} B)` : ''}`;
@@ -1732,7 +1736,7 @@ async function restoreSavedFiles() {
 }
 
 // Example programs appear under /sd/examples on every start; they are not saved with the user's files.
-const EXAMPLES = ['watchface.wasm', 'i2cscan.wasm', 'thermodial.wasm'];
+const EXAMPLES = ['watchface.wasm', 'i2cscan.wasm', 'thermodial.wasm', 'sketch.wasm'];
 
 async function addExamples() {
   for (const name of EXAMPLES) {

@@ -35,7 +35,9 @@ GC9A01 takes its commands (CASET, RASET, RAMWR, MADCTL, INVON, DISPON…)
 while DC is low and their parameters and pixels while it is high. A driver
 written for the part works unchanged. The **Bus** tab lists every
 transaction (program, bus, device, bytes each way, result) and says what
-it meant to the chip; a frame of pixel writes folds into one line.
+it meant to the chip; a frame of pixel writes folds into one line. When a
+program drives chip select itself, as Arduino libraries do, the chip is the
+one whose chip select pin was low.
 
 The runtime's GPIO port reports what programs drive and what the parts do;
 its display port paints into framebuffers the page shows; the page reports
@@ -48,6 +50,9 @@ bezel turns, button presses and touches to the kernel's input devices.
 - `i2cscan.wasm` lists the devices on an I2C bus.
 - `thermodial.wasm` reads the LM75 over I2C and draws on the GC9A01 with
   its own SPI driver.
+- `sketch.wasm` is an Arduino sketch built with the kernel's Arduino core
+  (`arduino/build.sh`): the LED blinks, the button counts presses through
+  an interrupt, the LM75 is read with `Wire`.
 
 Rebuild one with `clang --target=wasm32-wasip1 --sysroot=<wasi-sysroot>
 -Ios/wasm-rtos/include -O2 -o examples/<name>.wasm examples/<name>.c`.
