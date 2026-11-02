@@ -382,7 +382,8 @@ static void browser_gc9a01_pixel(BrowserGc9a01* panel, uint16_t color)
         x = y;
         y = swap;
     }
-    if ((panel->madctl & 0x40U) != 0U)
+    /* The glass shows columns mirrored, so drivers set MX for an upright picture. */
+    if ((panel->madctl & 0x40U) == 0U)
     {
         x = width - 1U - x;
     }
@@ -395,7 +396,8 @@ static void browser_gc9a01_pixel(BrowserGc9a01* panel, uint16_t color)
         /*
          * Like the common round modules: the glass inverts and its subpixels
          * are blue-green-red, so colors come out right only with INVON and
-         * the BGR bit of MADCTL, as drivers for these modules set them.
+         * the BGR bit of MADCTL, as drivers for these modules set them
+         * (MX | BGR for upright, as the GC9A01 drivers send).
          */
         uint16_t shown = panel->inverted ? color : (uint16_t)~color;
         if ((panel->madctl & 0x08U) == 0U)
