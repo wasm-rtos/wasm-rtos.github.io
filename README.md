@@ -19,21 +19,38 @@ lends to programs, under the names programs open them by, and the parts
 drawn for them:
 
 - **Dev board**: an LED (`"led"`, GPIO2), a push button (`"button-a"`,
-  GPIO0), `gpio0`…`gpio7`, and a 128×64 1-bit OLED as display `"main"`.
+  GPIO0), `gpio0`…`gpio7`, a 128×64 1-bit OLED as display `"main"`, and two
+  buses with bare chips on them: an LM75 temperature sensor at 0x48 on
+  `"i2c0"` (a slider sets the temperature) and a round GC9A01 panel on
+  `"spi0"` with chip select `"lcd-cs"` (GPIO5) and data/command `"lcd-dc"`
+  (GPIO4).
 - **Watch**: a round 240×240 RGB565 display `"main"`, a bezel (`"bezel"`,
   24 detents a turn: scroll over it or drag it around), two buttons
   (`"buttons"`: Select and Back, long press at 600 ms) and touch on the glass
   (`"touch"`).
 
+The chips on the buses are models that react to the bytes a program sends
+the way the real parts do: the LM75 has its pointer and registers, the
+GC9A01 takes its commands (CASET, RASET, RAMWR, MADCTL, INVON, DISPON…)
+while DC is low and their parameters and pixels while it is high. A driver
+written for the part works unchanged. The **Bus** tab lists every
+transaction (program, bus, device, bytes each way, result) and says what
+it meant to the chip; a frame of pixel writes folds into one line.
+
 The runtime's GPIO port reports what programs drive and what the parts do;
 its display port paints into framebuffers the page shows; the page reports
 bezel turns, button presses and touches to the kernel's input devices.
 
-`examples/` holds programs that appear under `/sd/examples` on every start.
-`watchface.wasm` runs on every profile: it asks the display for its size,
-shape and format and uses whatever inputs the device has. Rebuild it with
-`clang --target=wasm32-wasip1 --sysroot=<wasi-sysroot> -Ios/wasm-rtos/include
--O2 -o examples/watchface.wasm examples/watchface.c`.
+`examples/` holds programs that appear under `/sd/examples` on every start:
+
+- `watchface.wasm` runs on every profile: it asks the display for its size,
+  shape and format and uses whatever inputs the device has.
+- `i2cscan.wasm` lists the devices on an I2C bus.
+- `thermodial.wasm` reads the LM75 over I2C and draws on the GC9A01 with
+  its own SPI driver.
+
+Rebuild one with `clang --target=wasm32-wasip1 --sysroot=<wasi-sysroot>
+-Ios/wasm-rtos/include -O2 -o examples/<name>.wasm examples/<name>.c`.
 
 Selecting a program in Tasks shows it in the Inspector: its name from its
 metadata, state, memory by kind (linear memory, stack and how much of it was

@@ -5,8 +5,8 @@
  * os/wasm-rtos and wasm3. It supplies the kernel clock port from the
  * browser's clock, a GPIO port for the parts drawn on the page, a display
  * port that paints into framebuffers the page shows, input devices the page
- * reports to, and an output port that hands each program's stdout and stderr
- * to the page.
+ * reports to, I2C and SPI ports with models of the chips on the buses, and
+ * an output port that hands each program's stdout and stderr to the page.
  */
 
 #include "os/wasm-rtos/os.h"
@@ -245,6 +245,386 @@ static void browser_display_free_all(void)
         free(g_displays[index].rgba);
     }
     memset(g_displays, 0, sizeof(g_displays));
+}
+
+/* ---------------------------------------------------------------------------
+ * Buses and the chips on them. The chips are models that react to the bytes
+ * a program sends, the way the real parts do, so a driver written for the
+ * part works here unchanged.
+ * ------------------------------------------------------------------------ */
+
+#define BROWSER_CHIPS 4U
+#define BROWSER_CHIP_LM75 1U
+#define BROWSER_CHIP_GC9A01 2U
+
+/* A temperature sensor: a pointer register, then temperature, configuration, hysteresis, limit. */
+typedef struct BrowserLm75
+{
+    uint8_t pointer;
+    int32_t temperature_milli;
+    uint8_t config;
+    uint16_t registers[4];
+} BrowserLm75;
+
+/* A round TFT controller: commands while DC is low, their parameters and pixels while it is high. */
+typedef struct BrowserGc9a01
+{
+    uint32_t dc_pin;
+    uint8_t command;
+    uint32_t parameter;
+    uint8_t parameters[4];
+    uint32_t x0, x1, y0, y1;
+    uint32_t x, y;
+    uint8_t pixel_high;
+    uint8_t pixel_half;
+    uint8_t madctl;
+    uint8_t inverted;
+    uint8_t on;
+    uint8_t awake;
+    BrowserDisplay screen;
+} BrowserGc9a01;
+
+typedef struct BrowserChip
+{
+    uint8_t type;
+    uint32_t bus;
+    uint32_t address;   /* I2C address, or SPI chip select pin */
+    union
+    {
+        BrowserLm75 lm75;
+        BrowserGc9a01 gc9a01;
+    } as;
+} BrowserChip;
+
+static BrowserChip g_chips[BROWSER_CHIPS];
+
+static double browser_elapsed_now_ms(void);
+
+static BrowserChip* browser_i2c_chip(uint32_t bus, uint32_t address)
+{
+    uint32_t index;
+    for (index = 0U; index < BROWSER_CHIPS; ++index)
+    {
+        if (g_chips[index].type == BROWSER_CHIP_LM75 && g_chips[index].bus == bus && g_chips[index].address == address)
+        {
+            return &g_chips[index];
+        }
+    }
+    return NULL;
+}
+
+/* LM75 temperature: 11 bits of 1/8 degree, left-aligned in 16 bits. */
+static uint16_t browser_lm75_temperature(const BrowserLm75* sensor)
+{
+    int32_t eighths = sensor->temperature_milli >= 0 ? (sensor->temperature_milli + 62) / 125
+                                                     : (sensor->temperature_milli - 62) / 125;
+    return (uint16_t)((uint32_t)eighths << 5U);
+}
+
+static OsStatus browser_i2c_transaction(void* context, uint32_t bus, uint32_t address, uint32_t frequency_hz,
+                                        const OsI2cOp* ops, uint32_t count)
+{
+    BrowserChip* chip = browser_i2c_chip(bus, address);
+    uint32_t index;
+    (void)context;
+    (void)frequency_hz;
+
+    if (chip == NULL)
+    {
+        return OS_STATUS_NACK;
+    }
+    for (index = 0U; index < count; ++index)
+    {
+        BrowserLm75* sensor = &chip->as.lm75;
+        const OsI2cOp* op = &ops[index];
+        uint32_t byte;
+
+        /* A write sets the pointer, then fills the register it points at, high byte first. */
+        if (op->kind == OS_I2C_WRITE && op->length > 0U)
+        {
+            sensor->pointer = op->data[0] & 0x03U;
+            if (sensor->pointer == 1U && op->length > 1U)
+            {
+                sensor->config = op->data[1];
+            }
+            else if (sensor->pointer >= 2U && op->length > 2U)
+            {
+                sensor->registers[sensor->pointer] = (uint16_t)((op->data[1] << 8U) | op->data[2]);
+            }
+        }
+        else if (op->kind == OS_I2C_READ)
+        {
+            uint16_t value = sensor->pointer == 0U ? browser_lm75_temperature(sensor)
+                           : sensor->pointer == 1U ? (uint16_t)(sensor->config << 8U)
+                                                   : sensor->registers[sensor->pointer];
+            for (byte = 0U; byte < op->length; ++byte)
+            {
+                op->data[byte] = (uint8_t)(byte % 2U == 0U ? value >> 8U : value);
+            }
+        }
+    }
+    return OS_STATUS_OK;
+}
+
+static const OsI2cPort g_browser_i2c_port = { NULL, browser_i2c_transaction };
+
+/* One pixel of RAMWR, after the controller's address mode (MADCTL) and inversion. */
+static void browser_gc9a01_pixel(BrowserGc9a01* panel, uint16_t color)
+{
+    uint32_t x = panel->x;
+    uint32_t y = panel->y;
+    uint32_t width = panel->screen.width;
+    uint32_t height = panel->screen.height;
+
+    if ((panel->madctl & 0x20U) != 0U)
+    {
+        uint32_t swap = x;
+        x = y;
+        y = swap;
+    }
+    if ((panel->madctl & 0x40U) != 0U)
+    {
+        x = width - 1U - x;
+    }
+    if ((panel->madctl & 0x80U) != 0U)
+    {
+        y = height - 1U - y;
+    }
+    if (x < width && y < height)
+    {
+        /*
+         * Like the common round modules: the glass inverts and its subpixels
+         * are blue-green-red, so colors come out right only with INVON and
+         * the BGR bit of MADCTL, as drivers for these modules set them.
+         */
+        uint16_t shown = panel->inverted ? color : (uint16_t)~color;
+        if ((panel->madctl & 0x08U) == 0U)
+        {
+            shown = (uint16_t)(((shown & 0x1FU) << 11U) | (shown & 0x07E0U) | (shown >> 11U));
+        }
+        browser_display_put(&panel->screen, y * width + x, OS_DISPLAY_RGB565, shown);
+        panel->screen.dirty = 1U;
+    }
+    /* The window fills left to right, top to bottom, and wraps. */
+    if (++panel->x > panel->x1)
+    {
+        panel->x = panel->x0;
+        if (++panel->y > panel->y1)
+        {
+            panel->y = panel->y0;
+        }
+    }
+}
+
+static void browser_gc9a01_byte(BrowserGc9a01* panel, uint8_t byte, uint8_t data)
+{
+    if (!data)
+    {
+        panel->command = byte;
+        panel->parameter = 0U;
+        panel->pixel_half = 0U;
+        switch (byte)
+        {
+            case 0x11U: panel->awake = 1U; break;                   /* SLPOUT */
+            case 0x10U: panel->awake = 0U; break;                   /* SLPIN */
+            case 0x29U: panel->on = 1U; panel->screen.dirty = 1U; break;  /* DISPON */
+            case 0x28U: panel->on = 0U; panel->screen.dirty = 1U; break;  /* DISPOFF */
+            case 0x21U: panel->inverted = 1U; break;                /* INVON */
+            case 0x20U: panel->inverted = 0U; break;                /* INVOFF */
+            case 0x2CU: panel->x = panel->x0; panel->y = panel->y0; break; /* RAMWR */
+            default: break;
+        }
+        return;
+    }
+    if (panel->command == 0x2CU || panel->command == 0x3CU)
+    {
+        /* RAMWR and RAMWRC: RGB565, high byte first. */
+        if (!panel->pixel_half)
+        {
+            panel->pixel_high = byte;
+            panel->pixel_half = 1U;
+        }
+        else
+        {
+            panel->pixel_half = 0U;
+            browser_gc9a01_pixel(panel, (uint16_t)((panel->pixel_high << 8U) | byte));
+        }
+        return;
+    }
+    if (panel->parameter < sizeof(panel->parameters))
+    {
+        panel->parameters[panel->parameter] = byte;
+    }
+    ++panel->parameter;
+    if (panel->command == 0x2AU && panel->parameter == 4U)
+    {
+        panel->x0 = (uint32_t)(panel->parameters[0] << 8U) | panel->parameters[1];
+        panel->x1 = (uint32_t)(panel->parameters[2] << 8U) | panel->parameters[3];
+    }
+    else if (panel->command == 0x2BU && panel->parameter == 4U)
+    {
+        panel->y0 = (uint32_t)(panel->parameters[0] << 8U) | panel->parameters[1];
+        panel->y1 = (uint32_t)(panel->parameters[2] << 8U) | panel->parameters[3];
+    }
+    else if (panel->command == 0x36U && panel->parameter == 1U)
+    {
+        panel->madctl = byte;
+    }
+}
+
+static OsStatus browser_spi_transaction(void* context, uint32_t bus, uint32_t mode, uint32_t frequency_hz,
+                                        const OsSpiOp* ops, uint32_t count)
+{
+    uint32_t chip_index;
+    (void)context;
+    (void)mode;
+    (void)frequency_hz;
+
+    for (chip_index = 0U; chip_index < BROWSER_CHIPS; ++chip_index)
+    {
+        BrowserChip* chip = &g_chips[chip_index];
+        uint32_t index;
+
+        /* Only the chip whose chip select is low listens. */
+        if (chip->type != BROWSER_CHIP_GC9A01 || chip->bus != bus || browser_gpio_level(chip->address) != 0U)
+        {
+            continue;
+        }
+        for (index = 0U; index < count; ++index)
+        {
+            const OsSpiOp* op = &ops[index];
+            uint8_t data = browser_gpio_level(chip->as.gc9a01.dc_pin);
+            uint32_t byte;
+            if (op->write == NULL)
+            {
+                continue;
+            }
+            for (byte = 0U; byte < op->length; ++byte)
+            {
+                browser_gc9a01_byte(&chip->as.gc9a01, op->write[byte], data);
+            }
+        }
+    }
+    /* Nothing drives MISO: reads see zeros. */
+    {
+        uint32_t index;
+        for (index = 0U; index < count; ++index)
+        {
+            if (ops[index].read != NULL)
+            {
+                memset(ops[index].read, 0, ops[index].length);
+            }
+        }
+    }
+    return OS_STATUS_OK;
+}
+
+static const OsSpiPort g_browser_spi_port = { NULL, browser_spi_transaction };
+
+/*
+ * The bus analyzer: the last transactions with their program, device, the
+ * first bytes each way, and the GPIO levels when they ran (data/command
+ * lines are pins).
+ */
+#define BROWSER_BUS_EVENTS 1024U
+#define BROWSER_BUS_BYTES 16U
+
+typedef struct BrowserBusEvent
+{
+    double time_ms;
+    uint32_t task_id;
+    uint32_t kind;
+    uint32_t bus;
+    uint32_t device;
+    int32_t status;
+    uint32_t written;
+    uint32_t read;
+    uint32_t frequency_hz;
+    uint32_t pins;
+    uint32_t ops;
+    uint8_t out_bytes[BROWSER_BUS_BYTES];
+    uint8_t in_bytes[BROWSER_BUS_BYTES];
+} BrowserBusEvent;
+
+static BrowserBusEvent g_bus_events[BROWSER_BUS_EVENTS];
+static uint32_t g_bus_next_sequence = 1U;
+
+static void browser_bus_trace(void* context, const OsBusTrace* trace)
+{
+    BrowserBusEvent* event = &g_bus_events[(g_bus_next_sequence - 1U) % BROWSER_BUS_EVENTS];
+    uint32_t out_count = 0U;
+    uint32_t in_count = 0U;
+    uint32_t index;
+    uint32_t pin;
+    (void)context;
+
+    memset(event, 0, sizeof(*event));
+    event->time_ms = browser_elapsed_now_ms();
+    event->task_id = trace->task_id;
+    event->kind = trace->kind;
+    event->bus = trace->bus;
+    event->device = trace->device;
+    event->status = (int32_t)trace->status;
+    event->frequency_hz = trace->frequency_hz;
+    event->ops = trace->count;
+    for (pin = 0U; pin < BROWSER_GPIO_PINS; ++pin)
+    {
+        event->pins |= (uint32_t)browser_gpio_level(pin) << pin;
+    }
+    for (index = 0U; index < trace->count; ++index)
+    {
+        const uint8_t* out = NULL;
+        const uint8_t* in = NULL;
+        uint32_t length = 0U;
+        uint32_t byte;
+
+        if (trace->kind == OS_BUS_I2C)
+        {
+            const OsI2cOp* op = &((const OsI2cOp*)trace->ops)[index];
+            length = op->length;
+            out = op->kind == OS_I2C_WRITE ? op->data : NULL;
+            in = op->kind == OS_I2C_READ ? op->data : NULL;
+        }
+        else
+        {
+            const OsSpiOp* op = &((const OsSpiOp*)trace->ops)[index];
+            length = op->kind == OS_SPI_DELAY_US ? 0U : op->length;
+            out = op->write;
+            in = op->read;
+        }
+        if (out != NULL)
+        {
+            event->written += length;
+            for (byte = 0U; byte < length && out_count < BROWSER_BUS_BYTES; ++byte)
+            {
+                event->out_bytes[out_count++] = out[byte];
+            }
+        }
+        if (in != NULL && trace->status == OS_STATUS_OK)
+        {
+            event->read += length;
+            for (byte = 0U; byte < length && in_count < BROWSER_BUS_BYTES; ++byte)
+            {
+                event->in_bytes[in_count++] = in[byte];
+            }
+        }
+    }
+    ++g_bus_next_sequence;
+}
+
+static void browser_chips_free_all(void)
+{
+    uint32_t index;
+    for (index = 0U; index < BROWSER_CHIPS; ++index)
+    {
+        if (g_chips[index].type == BROWSER_CHIP_GC9A01)
+        {
+            free(g_chips[index].as.gc9a01.screen.rgba);
+        }
+    }
+    memset(g_chips, 0, sizeof(g_chips));
+    memset(g_bus_events, 0, sizeof(g_bus_events));
+    g_bus_next_sequence = 1U;
 }
 
 /*
@@ -1017,6 +1397,18 @@ int browser_runtime_init(void)
     {
         status = os_display_port_set(&g_browser_display_port);
     }
+    if (status == OS_STATUS_OK)
+    {
+        status = os_i2c_port_set(&g_browser_i2c_port);
+    }
+    if (status == OS_STATUS_OK)
+    {
+        status = os_spi_port_set(&g_browser_spi_port);
+    }
+    if (status == OS_STATUS_OK)
+    {
+        os_bus_trace_set(browser_bus_trace, NULL);
+    }
     if (status != OS_STATUS_OK)
     {
         browser_set_error("browser_runtime_init", status);
@@ -1190,6 +1582,156 @@ uint32_t browser_input_get_owner(uint32_t number)
 }
 
 EMSCRIPTEN_KEEPALIVE
+int browser_i2c_add_bus(const char* name, uint32_t bus, uint32_t frequency_hz)
+{
+    OsStatus status = os_i2c_add_bus(name, bus, frequency_hz);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_i2c_add_bus", status);
+    }
+    return (int)status;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int browser_spi_add_bus(const char* name, uint32_t bus, uint32_t max_hz)
+{
+    OsStatus status = os_spi_add_bus(name, bus, max_hz);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_spi_add_bus", status);
+    }
+    return (int)status;
+}
+
+static BrowserChip* browser_chip_slot(void)
+{
+    uint32_t index;
+    for (index = 0U; index < BROWSER_CHIPS; ++index)
+    {
+        if (g_chips[index].type == 0U)
+        {
+            return &g_chips[index];
+        }
+    }
+    return NULL;
+}
+
+/* An LM75 at address on I2C bus; returns the chip number, or -1. */
+EMSCRIPTEN_KEEPALIVE
+int browser_chip_add_lm75(uint32_t bus, uint32_t address, int32_t temperature_milli)
+{
+    BrowserChip* chip = browser_chip_slot();
+    if (chip == NULL)
+    {
+        return -1;
+    }
+    memset(chip, 0, sizeof(*chip));
+    chip->type = BROWSER_CHIP_LM75;
+    chip->bus = bus;
+    chip->address = address;
+    chip->as.lm75.temperature_milli = temperature_milli;
+    chip->as.lm75.registers[2] = 75U << 8U;  /* hysteresis, 75 C */
+    chip->as.lm75.registers[3] = 80U << 8U;  /* overtemperature limit, 80 C */
+    return (int)(chip - g_chips);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void browser_chip_set_temperature(uint32_t chip, int32_t temperature_milli)
+{
+    if (chip < BROWSER_CHIPS && g_chips[chip].type == BROWSER_CHIP_LM75)
+    {
+        g_chips[chip].as.lm75.temperature_milli = temperature_milli;
+    }
+}
+
+/* A GC9A01 on SPI bus with chip select cs_pin and data/command dc_pin; returns the chip number, or -1. */
+EMSCRIPTEN_KEEPALIVE
+int browser_chip_add_gc9a01(uint32_t bus, uint32_t cs_pin, uint32_t dc_pin, uint32_t width, uint32_t height)
+{
+    BrowserChip* chip = browser_chip_slot();
+    uint32_t index;
+    if (chip == NULL || cs_pin >= BROWSER_GPIO_PINS || dc_pin >= BROWSER_GPIO_PINS)
+    {
+        return -1;
+    }
+    memset(chip, 0, sizeof(*chip));
+    chip->as.gc9a01.screen.rgba = (uint8_t*)calloc((size_t)width * height, 4U);
+    if (chip->as.gc9a01.screen.rgba == NULL)
+    {
+        return -1;
+    }
+    for (index = 0U; index < width * height; ++index)
+    {
+        chip->as.gc9a01.screen.rgba[index * 4U + 3U] = 255U;
+    }
+    chip->type = BROWSER_CHIP_GC9A01;
+    chip->bus = bus;
+    chip->address = cs_pin;
+    chip->as.gc9a01.dc_pin = dc_pin;
+    chip->as.gc9a01.screen.width = width;
+    chip->as.gc9a01.screen.height = height;
+    chip->as.gc9a01.x1 = width - 1U;
+    chip->as.gc9a01.y1 = height - 1U;
+    chip->as.gc9a01.screen.dirty = 1U;
+    return (int)(chip - g_chips);
+}
+
+static BrowserGc9a01* browser_panel(uint32_t chip)
+{
+    return chip < BROWSER_CHIPS && g_chips[chip].type == BROWSER_CHIP_GC9A01 ? &g_chips[chip].as.gc9a01 : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint8_t* browser_chip_framebuffer(uint32_t chip)
+{
+    BrowserGc9a01* panel = browser_panel(chip);
+    return panel != NULL ? panel->screen.rgba : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_chip_take_dirty(uint32_t chip)
+{
+    BrowserGc9a01* panel = browser_panel(chip);
+    uint32_t dirty = panel != NULL ? panel->screen.dirty : 0U;
+    if (panel != NULL)
+    {
+        panel->screen.dirty = 0U;
+    }
+    return dirty;
+}
+
+/* Whether the panel shows its memory: awake and switched on. */
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_chip_is_showing(uint32_t chip)
+{
+    BrowserGc9a01* panel = browser_panel(chip);
+    return panel != NULL && panel->on && panel->awake;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_bus_get_latest_sequence(void)
+{
+    return g_bus_next_sequence - 1U;
+}
+
+/* The event with sequence number sequence, or NULL when it is gone or not there yet. */
+EMSCRIPTEN_KEEPALIVE
+const BrowserBusEvent* browser_bus_get_event(uint32_t sequence)
+{
+    if (sequence == 0U || sequence >= g_bus_next_sequence || g_bus_next_sequence - sequence > BROWSER_BUS_EVENTS)
+    {
+        return NULL;
+    }
+    return &g_bus_events[(sequence - 1U) % BROWSER_BUS_EVENTS];
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_bus_event_size(void)
+{
+    return (uint32_t)sizeof(BrowserBusEvent);
+}
+
+EMSCRIPTEN_KEEPALIVE
 uint32_t browser_gpio_get_owner(uint32_t pin)
 {
     return os_gpio_get_owner(pin);
@@ -1232,6 +1774,7 @@ void browser_runtime_shutdown(void)
 
     browser_free_all_records();
     browser_display_free_all();
+    browser_chips_free_all();
     browser_clock_stop();
     g_clock_now_ms = 0U;
     g_last_budget_time_ms = 0U;

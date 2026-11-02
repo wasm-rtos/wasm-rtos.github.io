@@ -191,6 +191,7 @@
         <div class="well tabs-well" role="tablist" aria-label="Editor">
           <button class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="timelinePane" id="timelineTab">Timeline</button>
           <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="consolePane" id="consoleTab">Console</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="busPane" id="busTab">Bus</button>
         </div>
         <div class="editor-tabs-meta">
           <span id="schedulerTimelineStatus" class="timeline-live"><i aria-hidden="true"></i> Live</span>
@@ -210,6 +211,9 @@
       </div>
       <div id="consolePane" class="editor-pane" role="tabpanel" aria-labelledby="consoleTab" hidden>
         <pre id="consoleLog" class="terminal" aria-live="polite"></pre>
+      </div>
+      <div id="busPane" class="editor-pane" role="tabpanel" aria-labelledby="busTab" hidden>
+        <pre id="busLog" class="terminal bus-log">No bus transactions yet. Programs that use i2c or spi show up here.</pre>
       </div>
     </section>
   </div>
