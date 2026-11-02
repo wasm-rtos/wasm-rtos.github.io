@@ -1274,7 +1274,7 @@ function readBusEvent(pointer) {
   const read = u32(32);
   return {
     time: view.getFloat64(0, true), task: u32(8), kind: u32(12), bus: u32(16), device: u32(20), status: view.getInt32(24, true),
-    written, read, hz: u32(36), pins: u32(40), ops: u32(44),
+    written, read, hz: u32(36), pins: u32(40), ops: u32(44), wireUs: u32(80), background: u32(84) === 1,
     out: [...new Uint8Array(runtime.HEAPU8.buffer, pointer + 48, Math.min(16, written))],
     in: [...new Uint8Array(runtime.HEAPU8.buffer, pointer + 64, Math.min(16, read))]
   };
@@ -1291,12 +1291,15 @@ function busRow(event) {
     .filter(Boolean).join(' → ') || (event.ops ? '' : 'address only');
   const status = BUS_STATUS_NAMES[event.status] ?? `status ${event.status}`;
   const meaning = decodeBus(event, chip);
+  // Time on the wire; transfers long enough run in the background while other programs work.
+  const wire = event.wireUs >= 1000 ? `${(event.wireUs / 1000).toFixed(2)} ms` : `${event.wireUs} µs`;
   return {
     key: `${event.task}:${busName}:${device}`,
     pixels: meaning.startsWith('pixels'),
     event,
     text: [`${(event.time / 1000).toFixed(3).padStart(9)} s`, `task_${event.task}`.padEnd(8), busName, device.padEnd(7),
-      (chip?.name ?? '').padEnd(7), data, meaning, event.status ? `! ${status}` : ''].filter(Boolean).join('  ')
+      (chip?.name ?? '').padEnd(7), data, meaning, event.background ? `[${wire} in background]` : '',
+      event.status ? `! ${status}` : ''].filter(Boolean).join('  ')
   };
 }
 
@@ -1316,7 +1319,9 @@ function pollBus() {
     if (row.pixels && previous?.pixels && previous.key === row.key) {
       previous.count = (previous.count ?? 1) + 1;
       previous.bytes = (previous.bytes ?? previous.event.written) + row.event.written;
-      previous.text = previous.text.replace(/  pixels.*$/, `  pixels, ${previous.bytes / 2} px in ${previous.count} writes`);
+      previous.wireUs = (previous.wireUs ?? previous.event.wireUs) + row.event.wireUs;
+      const wire = previous.wireUs >= 1000 ? `${(previous.wireUs / 1000).toFixed(2)} ms` : `${previous.wireUs} µs`;
+      previous.text = previous.text.replace(/  pixels.*$/, `  pixels, ${previous.bytes / 2} px in ${previous.count} writes, ${wire} on the wire`);
     } else {
       busRows.push(row);
     }
