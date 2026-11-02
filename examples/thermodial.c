@@ -59,10 +59,13 @@ static uint16_t heat_color(int32_t tenths)
     return (uint16_t)(((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3));
 }
 
-/* The whole frame row by row: the window is the screen, RAMWR, then 240 rows of pixels. */
+/* Rows sent in one transfer: a tenth of the screen, like a graphics library's draw buffer. */
+#define BAND 24
+
+/* The whole frame: the window is the screen, RAMWR, then bands of rows (DMA moves each in the background). */
 static void draw(int32_t tenths)
 {
-    static uint8_t row[SIZE * 2];
+    static uint8_t band[BAND * SIZE * 2];
     static const uint8_t window[4] = { 0, 0, 0, SIZE - 1 };
     int32_t radius = 20 + (tenths + 100) * 95 / 600;
     uint16_t color = heat_color(tenths);
@@ -75,17 +78,21 @@ static void draw(int32_t tenths)
     command(0x2B, window, 4);
     command(0x2C, 0, 0);
     wr_gpio_set(g_dc, 1);
-    for (int32_t y = 0; y < SIZE; ++y)
+    for (int32_t top = 0; top < SIZE; top += BAND)
     {
-        for (int32_t x = 0; x < SIZE; ++x)
+        for (int32_t y = top; y < top + BAND; ++y)
         {
-            int32_t dx = x - SIZE / 2, dy = y - SIZE / 2;
-            int32_t d2 = dx * dx + dy * dy;
-            uint16_t pixel = d2 < radius * radius ? color : d2 < 118 * 118 && d2 > 112 * 112 ? 0x7BEF : 0x0000;
-            row[x * 2] = (uint8_t)(pixel >> 8);  /* the controller takes the high byte first */
-            row[x * 2 + 1] = (uint8_t)pixel;
+            uint8_t* row = band + (y - top) * SIZE * 2;
+            for (int32_t x = 0; x < SIZE; ++x)
+            {
+                int32_t dx = x - SIZE / 2, dy = y - SIZE / 2;
+                int32_t d2 = dx * dx + dy * dy;
+                uint16_t pixel = d2 < radius * radius ? color : d2 < 118 * 118 && d2 > 112 * 112 ? 0x7BEF : 0x0000;
+                row[x * 2] = (uint8_t)(pixel >> 8);  /* the controller takes the high byte first */
+                row[x * 2 + 1] = (uint8_t)pixel;
+            }
         }
-        wr_spi_write(g_lcd, row, sizeof(row));
+        wr_spi_write(g_lcd, band, sizeof(band));
     }
 }
 

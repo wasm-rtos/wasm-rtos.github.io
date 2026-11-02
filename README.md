@@ -39,6 +39,12 @@ it meant to the chip; a frame of pixel writes folds into one line. When a
 program drives chip select itself, as Arduino libraries do, the chip is the
 one whose chip select pin was low.
 
+Transfers take their time on the wire: the bits at the bus's speed. Short
+ones finish in the call, as drivers poll them; from 100 µs on they run in
+the background, as with DMA, through the kernel's asynchronous bus ports:
+the program waits while the others run, and the Bus tab marks them with
+their wire time (a full 240×240 frame at 40 MHz is 23 ms).
+
 The runtime's GPIO port reports what programs drive and what the parts do;
 its display port paints into framebuffers the page shows; the page reports
 bezel turns, button presses and touches to the kernel's input devices.
@@ -49,7 +55,7 @@ bezel turns, button presses and touches to the kernel's input devices.
   shape and format and uses whatever inputs the device has.
 - `i2cscan.wasm` lists the devices on an I2C bus.
 - `thermodial.wasm` reads the LM75 over I2C and draws on the GC9A01 with
-  its own SPI driver.
+  its own SPI driver, a tenth of the screen per transfer.
 - `sketch.wasm` is an Arduino sketch built with the kernel's Arduino core
   (`arduino/build.sh`): the LED blinks, the button counts presses through
   an interrupt, the LM75 is read with `Wire`.

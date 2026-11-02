@@ -300,6 +300,97 @@ static BrowserChip g_chips[BROWSER_CHIPS];
 
 static double browser_elapsed_now_ms(void);
 
+/*
+ * Time on the wire. A transfer takes as long as its bits at the bus's
+ * speed. Short ones finish in the call, as drivers poll them; longer ones
+ * run in the background, as with DMA: the program waits while the others
+ * run, and the step loop reports the end when its time has passed.
+ */
+#define BROWSER_BACKGROUND_MIN_US 100.0
+/* With nothing else to run, the step loop waits this long for a transfer to end within the frame. */
+#define BROWSER_WIRE_SPIN_MS 4.0
+
+typedef struct BrowserWire
+{
+    uint8_t pending;
+    double due_ms;
+    /* The last transfer, for the bus analyzer. */
+    double last_us;
+    uint8_t last_background;
+} BrowserWire;
+
+/* By bus kind (OS_BUS_I2C, OS_BUS_SPI) and bus number. */
+static BrowserWire g_wire[3][2];
+
+static OsStatus browser_wire_start(uint32_t kind, uint32_t bus, double microseconds)
+{
+    if (bus >= 2U)
+    {
+        return OS_STATUS_OK;
+    }
+    g_wire[kind][bus].last_us = microseconds;
+    g_wire[kind][bus].last_background = microseconds >= BROWSER_BACKGROUND_MIN_US;
+    if (!g_wire[kind][bus].last_background)
+    {
+        return OS_STATUS_OK;
+    }
+    g_wire[kind][bus].pending = 1U;
+    g_wire[kind][bus].due_ms = browser_elapsed_now_ms() + microseconds / 1000.0;
+    return OS_STATUS_PENDING;
+}
+
+static void browser_wire_end(uint32_t kind, uint32_t bus)
+{
+    if (bus < 2U && g_wire[kind][bus].pending)
+    {
+        g_wire[kind][bus].pending = 0U;
+        os_bus_complete(kind, bus, OS_STATUS_OK);
+    }
+}
+
+/* The kernel needs the transfer over now (a pause, a kill): it is. */
+static void browser_i2c_finish(void* context, uint32_t bus)
+{
+    (void)context;
+    browser_wire_end(OS_BUS_I2C, bus);
+}
+
+static void browser_spi_finish(void* context, uint32_t bus)
+{
+    (void)context;
+    browser_wire_end(OS_BUS_SPI, bus);
+}
+
+/* End the transfers whose time is up; milliseconds until the next one ends, or -1 when none is left. */
+static double browser_wire_poll(void)
+{
+    double now = browser_elapsed_now_ms();
+    double next = -1.0;
+    uint32_t kind;
+    uint32_t bus;
+
+    for (kind = OS_BUS_I2C; kind <= OS_BUS_SPI; ++kind)
+    {
+        for (bus = 0U; bus < 2U; ++bus)
+        {
+            BrowserWire* wire = &g_wire[kind][bus];
+            if (!wire->pending)
+            {
+                continue;
+            }
+            if (now >= wire->due_ms)
+            {
+                browser_wire_end(kind, bus);
+            }
+            else if (next < 0.0 || wire->due_ms - now < next)
+            {
+                next = wire->due_ms - now;
+            }
+        }
+    }
+    return next;
+}
+
 static BrowserChip* browser_i2c_chip(uint32_t bus, uint32_t address)
 {
     uint32_t index;
@@ -363,10 +454,18 @@ static OsStatus browser_i2c_transaction(void* context, uint32_t bus, uint32_t ad
             }
         }
     }
-    return OS_STATUS_OK;
+    {
+        /* 9 clocks a byte, with an address byte for every start, plus start and stop. */
+        uint32_t bytes = count > 0U ? count : 1U;
+        for (index = 0U; index < count; ++index)
+        {
+            bytes += ops[index].length;
+        }
+        return browser_wire_start(OS_BUS_I2C, bus, (9.0 * bytes + 2.0) * 1e6 / (frequency_hz != 0U ? frequency_hz : 100000U));
+    }
 }
 
-static const OsI2cPort g_browser_i2c_port = { NULL, browser_i2c_transaction };
+static const OsI2cPort g_browser_i2c_port = { NULL, browser_i2c_transaction, browser_i2c_finish };
 
 /* One pixel of RAMWR, after the controller's address mode (MADCTL) and inversion. */
 static void browser_gc9a01_pixel(BrowserGc9a01* panel, uint16_t color)
@@ -480,7 +579,6 @@ static OsStatus browser_spi_transaction(void* context, uint32_t bus, uint32_t mo
     uint32_t chip_index;
     (void)context;
     (void)mode;
-    (void)frequency_hz;
 
     for (chip_index = 0U; chip_index < BROWSER_CHIPS; ++chip_index)
     {
@@ -507,21 +605,28 @@ static OsStatus browser_spi_transaction(void* context, uint32_t bus, uint32_t mo
             }
         }
     }
-    /* Nothing drives MISO: reads see zeros. */
+    /* Nothing drives MISO: reads see zeros. Eight clocks a byte, and the delays. */
     {
         uint32_t index;
+        double microseconds = 0.0;
         for (index = 0U; index < count; ++index)
         {
+            if (ops[index].kind == OS_SPI_DELAY_US)
+            {
+                microseconds += ops[index].length;
+                continue;
+            }
             if (ops[index].read != NULL)
             {
                 memset(ops[index].read, 0, ops[index].length);
             }
+            microseconds += 8.0 * ops[index].length * 1e6 / (frequency_hz != 0U ? frequency_hz : 1000000U);
         }
+        return browser_wire_start(OS_BUS_SPI, bus, microseconds);
     }
-    return OS_STATUS_OK;
 }
 
-static const OsSpiPort g_browser_spi_port = { NULL, browser_spi_transaction };
+static const OsSpiPort g_browser_spi_port = { NULL, browser_spi_transaction, browser_spi_finish };
 
 /*
  * The bus analyzer: the last transactions with their program, device, the
@@ -546,6 +651,8 @@ typedef struct BrowserBusEvent
     uint32_t ops;
     uint8_t out_bytes[BROWSER_BUS_BYTES];
     uint8_t in_bytes[BROWSER_BUS_BYTES];
+    uint32_t wire_us;
+    uint32_t background;
 } BrowserBusEvent;
 
 static BrowserBusEvent g_bus_events[BROWSER_BUS_EVENTS];
@@ -569,6 +676,11 @@ static void browser_bus_trace(void* context, const OsBusTrace* trace)
     event->status = (int32_t)trace->status;
     event->frequency_hz = trace->frequency_hz;
     event->ops = trace->count;
+    if (trace->bus < 2U && (trace->kind == OS_BUS_I2C || trace->kind == OS_BUS_SPI))
+    {
+        event->wire_us = (uint32_t)(g_wire[trace->kind][trace->bus].last_us + 0.5);
+        event->background = g_wire[trace->kind][trace->bus].last_background;
+    }
     for (pin = 0U; pin < BROWSER_GPIO_PINS; ++pin)
     {
         event->pins |= (uint32_t)browser_gpio_level(pin) << pin;
@@ -625,6 +737,7 @@ static void browser_chips_free_all(void)
         }
     }
     memset(g_chips, 0, sizeof(g_chips));
+    memset(g_wire, 0, sizeof(g_wire));
     memset(g_bus_events, 0, sizeof(g_bus_events));
     g_bus_next_sequence = 1U;
 }
@@ -1942,15 +2055,26 @@ int browser_runtime_step(uint32_t now_ms, uint32_t max_slices)
 
     for (slice = 0U; slice < max_slices; ++slice)
     {
-        double slice_started_at_ms = browser_elapsed_now_ms();
+        double slice_started_at_ms;
         double slice_finished_at_ms;
 
+        (void)browser_wire_poll();
+        slice_started_at_ms = browser_elapsed_now_ms();
         status = os_schedule();
         slice_finished_at_ms = browser_elapsed_now_ms();
         browser_trace_capture_slice(slice_started_at_ms, slice_finished_at_ms);
         if (status == OS_STATUS_NO_READY_TASKS)
         {
-            return (int)OS_STATUS_OK;
+            /* Everyone waits; a transfer about to end is worth waiting for within this frame. */
+            double wait_ms = browser_wire_poll();
+            if (wait_ms < 0.0 || wait_ms > BROWSER_WIRE_SPIN_MS)
+            {
+                return (int)OS_STATUS_OK;
+            }
+            while (browser_elapsed_now_ms() < slice_finished_at_ms + wait_ms)
+            {
+            }
+            continue;
         }
         if (status != OS_STATUS_OK)
         {
