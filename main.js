@@ -20,6 +20,9 @@ let traceWindowMs = 10000;
 
 const FUEL_TELEMETRY_WINDOW_MS = 1000;
 const TASK_ACTIVITY_PULSE_MS = 1500;
+// Lines kept in the console and in each program's output.
+const CONSOLE_MAX_LINES = 2000;
+const PROGRAM_OUTPUT_MAX_LINES = 500;
 const TRACE_MIN_WINDOW_MS = 10000;
 const TRACE_MAX_WINDOW_MS = 60000;
 const TRACE_MIN_VISIBLE_SLICES = 4;
@@ -95,6 +98,7 @@ const programSection = document.querySelector('#programSection');
 const programTitle = document.querySelector('#programTitle');
 const programProps = document.querySelector('#programProps');
 const programError = document.querySelector('#programError');
+const programOutput = document.querySelector('#programOutput');
 const fileInput = document.querySelector('#wasmFile');
 const pageDropOverlay = document.querySelector('#pageDropOverlay');
 const loadButton = document.querySelector('#loadButton');
@@ -135,6 +139,7 @@ const schedulerTimelineContext = schedulerTimelineCanvas.getContext('2d');
 
 const fuelNumberFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const integerNumberFormat = new Intl.NumberFormat('en-US');
+const compactNumberFormat = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
 
 const cpuView = {};
 
@@ -142,10 +147,59 @@ function timeStamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
 }
 
+// The console keeps its last lines and redraws once per frame, so a chatty program cannot stall the page.
+const consoleLines = [];
+let consoleRedrawPending = false;
+
 function appendLog(message) {
-  const current = consoleLog.textContent.replace(/\n?> _\s*$/, '');
-  consoleLog.textContent = `${current}\n[${timeStamp()}] ${message}\n> _`.trimStart();
-  consoleLog.scrollTop = consoleLog.scrollHeight;
+  consoleLines.push(`[${timeStamp()}] ${message}`);
+  if (consoleLines.length > CONSOLE_MAX_LINES) consoleLines.splice(0, consoleLines.length - CONSOLE_MAX_LINES);
+  if (consoleRedrawPending) return;
+  consoleRedrawPending = true;
+  requestAnimationFrame(() => {
+    consoleRedrawPending = false;
+    consoleLog.textContent = `${consoleLines.join('\n')}\n> _`;
+    consoleLog.scrollTop = consoleLog.scrollHeight;
+  });
+}
+
+/* ---------- Program output ---------- */
+
+// Output arrives as bytes in pieces of any size; lines are cut per program and stream.
+const outputStreams = new Map();
+
+function onProgramOutput(taskId, fd, bytes) {
+  const key = `${taskId}:${fd}`;
+  let stream = outputStreams.get(key);
+  if (!stream) {
+    stream = { decoder: new TextDecoder(), pending: '' };
+    outputStreams.set(key, stream);
+  }
+  const lines = (stream.pending + stream.decoder.decode(bytes, { stream: true })).split('\n');
+  stream.pending = lines.pop();
+  lines.forEach((line) => addProgramLine(taskId, fd, line));
+}
+
+// A program that ends without a final newline still shows its last line.
+function flushProgramOutput(taskId) {
+  [1, 2].forEach((fd) => {
+    const key = `${taskId}:${fd}`;
+    const stream = outputStreams.get(key);
+    if (!stream) return;
+    const rest = stream.pending + stream.decoder.decode();
+    if (rest) addProgramLine(taskId, fd, rest);
+    outputStreams.delete(key);
+  });
+}
+
+function addProgramLine(taskId, fd, line) {
+  const task = tasks.find((entry) => entry.osTaskId === taskId);
+  const label = task ? task.id : `task_${taskId}`;
+  appendLog(fd === 2 ? `${label} stderr: ${line}` : `${label}: ${line}`);
+  if (!task) return;
+  task.output.push(fd === 2 ? `! ${line}` : line);
+  if (task.output.length > PROGRAM_OUTPUT_MAX_LINES) task.output.splice(0, task.output.length - PROGRAM_OUTPUT_MAX_LINES);
+  task.outputVersion += 1;
 }
 
 function readCString(pointer) {
@@ -1087,6 +1141,12 @@ function renderProgram() {
   add('State', task.swapped ? `${task.status}, in swap` : task.status);
   add('Priority', String(task.priority));
   add('Runs', integerNumberFormat.format(task.runCount));
+  if (task.osTaskId) {
+    const fuel = callRuntime('browser_task_get_fuel_used', 'number', ['number'], [task.osTaskId]);
+    const cpuMs = callRuntime('browser_task_get_cpu_ms', 'number', ['number'], [task.osTaskId]);
+    add('Fuel', `${compactNumberFormat.format(fuel)} spent`);
+    add('CPU time', formatCpuTime(cpuMs));
+  }
   const ended = ['Completed', 'Failed', 'Stopped'].includes(task.status);
   if (memory && ended) {
     add('Stack', `${formatSize(memory.stackPeak)} at most`);
@@ -1118,6 +1178,25 @@ function renderProgram() {
   const error = readTaskString('browser_task_get_error', task.osTaskId);
   programError.hidden = !error;
   programError.textContent = error;
+  renderProgramOutput(task);
+}
+
+// Redraw only when the output changed; stay at the bottom unless the reader scrolled up.
+function renderProgramOutput(task) {
+  if (programOutput.dataset.task === task.localId && programOutput.dataset.version === String(task.outputVersion)) return;
+  const sameTask = programOutput.dataset.task === task.localId;
+  const atBottom = programOutput.scrollHeight - programOutput.scrollTop - programOutput.clientHeight < 4;
+  programOutput.dataset.task = task.localId;
+  programOutput.dataset.version = String(task.outputVersion);
+  programOutput.hidden = task.output.length === 0;
+  programOutput.textContent = task.output.join('\n');
+  if (atBottom || !sameTask) programOutput.scrollTop = programOutput.scrollHeight;
+}
+
+function formatCpuTime(milliseconds) {
+  if (milliseconds < 1) return `${(milliseconds * 1000).toFixed(0)} µs`;
+  if (milliseconds < 1000) return `${milliseconds.toFixed(1)} ms`;
+  return `${(milliseconds / 1000).toFixed(2)} s`;
 }
 
 /* ---------- Files ---------- */
@@ -1217,6 +1296,8 @@ function runProgram(path) {
     runCount: 0,
     lastRunAt: 0,
     activityUntil: 0,
+    output: [],
+    outputVersion: 0,
     traceColor: TRACE_COLORS[nextTraceColor++ % TRACE_COLORS.length]
   };
 
@@ -2003,6 +2084,9 @@ function refreshRuntimeState() {
       const previous = task.status;
       task.status = stateToStatus(task.osTaskId);
       task.swapped = callRuntime('browser_task_is_swapped', 'number', ['number'], [task.osTaskId]) === 1;
+      if (['Completed', 'Failed', 'Stopped'].includes(task.status) && previous !== task.status) {
+        flushProgramOutput(task.osTaskId);
+      }
       if (task.status === 'Failed' && previous !== 'Failed') {
         appendLog(`${task.id} failed: ${readTaskString('browser_task_get_error', task.osTaskId) || runtimeError()}`);
       }
@@ -2035,7 +2119,6 @@ function updateRuntimeClock() {
 }
 
 async function initializeRuntime() {
-  consoleLog.textContent = '> _';
   appendLog('Loading wasm-rtos browser runtime');
   try {
     if (typeof createWasmRtosModule !== 'function') {
@@ -2043,6 +2126,7 @@ async function initializeRuntime() {
     }
     runtime = await createWasmRtosModule({
       locateFile: (path) => path.endsWith('.wasm') ? 'os/wasm-rtos.wasm' : `os/${path}`,
+      onProgramOutput,
       print: (message) => appendLog(message),
       printErr: (message) => appendLog(`ERROR: ${message}`)
     });
