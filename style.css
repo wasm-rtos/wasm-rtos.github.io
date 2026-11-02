@@ -544,6 +544,17 @@ button:disabled { cursor: default; opacity: .45; }
 .task.is-selected { box-shadow: inset 2px 0 0 var(--accent-select); background: rgba(255, 255, 255, .04); }
 .section-title-detail { margin-left: 6px; color: var(--gray-10); font-weight: 500; text-transform: none; letter-spacing: 0; }
 .program-error { color: var(--accent-error); font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+.program-output {
+  max-height: 180px;
+  margin: 0 10px 10px;
+  padding: 6px 8px;
+  overflow: auto;
+  background: var(--gray-1);
+  color: #cfcfcf;
+  font: 11px/1.45 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .task-dot { width: 8px; height: 8px; border-radius: 50%; }
 .task-name { color: var(--gray-10); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task-meta {

@@ -21,7 +21,11 @@ board do, such as a pressed button.
 Selecting a program in Tasks shows it in the Inspector: its name from its
 metadata, state, memory by kind (linear memory, stack and how much of it was
 used, compiled code, kernel), the pins it owns, and, when it failed, why and
-in which functions. Pausing a program, or the ⇣ button, swaps it out of RAM;
+in which functions. It also shows the fuel the program has spent (the
+interpreter's work count, the same on every device), the browser time its
+slices took, and its own output. The Console shows every program's stdout
+and stderr, each line marked with the task that wrote it; the runtime's
+output port delivers them per task. Pausing a program, or the ⇣ button, swaps it out of RAM;
 swap images are kept in JavaScript, outside the runtime's memory, and the
 program comes back when it runs again.
 

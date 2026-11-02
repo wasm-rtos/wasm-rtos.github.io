@@ -3,7 +3,8 @@
  *
  * Build this file with Emscripten together with the kernel sources in
  * os/wasm-rtos and wasm3. It supplies the kernel clock port from the
- * browser's clock and a GPIO port for the parts drawn on the page.
+ * browser's clock, a GPIO port for the parts drawn on the page, and an
+ * output port that hands each program's stdout and stderr to the page.
  */
 
 #include "os/wasm-rtos/os.h"
@@ -149,6 +150,24 @@ static void browser_swap_discard(void* context, uint32_t task_id)
     browser_swap_discard_js(task_id);
 }
 
+/* The page keeps a log per program; it gets the bytes as written. */
+EM_JS(void, browser_output_to_page, (uint32_t task_id, uint32_t fd, const void* data, uint32_t size), {
+    if (Module.onProgramOutput) {
+        Module.onProgramOutput(task_id, fd, HEAPU8.slice(data, data + size));
+    }
+});
+
+static void browser_output_write(void* context, uint32_t task_id, uint32_t fd, const void* data, uint32_t size)
+{
+    (void)context;
+    browser_output_to_page(task_id, fd, data, size);
+}
+
+static const OsOutputPort g_browser_output_port =
+{
+    NULL, browser_output_write
+};
+
 static const OsSwapPort g_browser_swap_port =
 {
     NULL, browser_swap_write, browser_swap_read, browser_swap_discard
@@ -158,6 +177,8 @@ typedef struct BrowserTaskRecord
 {
     uint32_t task_id;
     uint32_t observed_run_count;
+    /* Browser time the task's slices took. */
+    double cpu_ms;
     OsTaskHandle task;
     struct BrowserTaskRecord* next;
 } BrowserTaskRecord;
@@ -252,6 +273,7 @@ static void browser_trace_capture_slice(double started_at_ms, double finished_at
         if (run_count > record->observed_run_count)
         {
             record->observed_run_count = run_count;
+            record->cpu_ms += finished_at_ms - started_at_ms;
             browser_trace_append(record->task_id, started_at_ms, finished_at_ms - started_at_ms);
             return;
         }
@@ -846,6 +868,10 @@ int browser_runtime_init(void)
     {
         status = os_swap_port_set(&g_browser_swap_port);
     }
+    if (status == OS_STATUS_OK)
+    {
+        status = os_output_port_set(&g_browser_output_port);
+    }
     if (status != OS_STATUS_OK)
     {
         browser_set_error("browser_runtime_init", status);
@@ -1312,6 +1338,21 @@ uint32_t browser_task_get_run_count(uint32_t task_id)
 {
     BrowserTaskRecord* record = browser_find_record(task_id);
     return record != NULL ? os_task_get_run_count(record->task) : 0U;
+}
+
+/* A double holds every count of fuel a page session reaches exactly. */
+EMSCRIPTEN_KEEPALIVE
+double browser_task_get_fuel_used(uint32_t task_id)
+{
+    BrowserTaskRecord* record = browser_find_record(task_id);
+    return record != NULL ? (double)os_task_get_fuel_used(record->task) : 0.0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+double browser_task_get_cpu_ms(uint32_t task_id)
+{
+    BrowserTaskRecord* record = browser_find_record(task_id);
+    return record != NULL ? record->cpu_ms : 0.0;
 }
 
 EMSCRIPTEN_KEEPALIVE
