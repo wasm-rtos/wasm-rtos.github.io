@@ -8,7 +8,7 @@ EMCC_BIN="${EMCC:-emcc}"
 OUTPUT_JS="os/wasm-rtos.js"
 OUTPUT_WASM="os/wasm-rtos.wasm"
 WASM_RTOS_DIR="os/wasm-rtos"
-WASM3_SOURCE_DIR="$WASM_RTOS_DIR/wasm3/source"
+VM_SOURCE_DIR="$WASM_RTOS_DIR/vm/source"
 
 if ! command -v "$EMCC_BIN" >/dev/null 2>&1; then
     echo "FAIL Emscripten compiler not found: $EMCC_BIN"
@@ -28,8 +28,8 @@ for required_file in "${required_files[@]}"; do
     fi
 done
 
-if [ ! -d "$WASM3_SOURCE_DIR" ]; then
-    echo "FAIL wasm3 source directory is missing: $WASM3_SOURCE_DIR"
+if [ ! -d "$VM_SOURCE_DIR" ]; then
+    echo "FAIL interpreter source directory is missing: $VM_SOURCE_DIR"
     exit 1
 fi
 
@@ -43,12 +43,12 @@ if [ "${#kernel_sources[@]}" -eq 0 ]; then
     exit 1
 fi
 
-wasm3_sources=()
-while IFS= read -r wasm3_source; do
-    wasm3_sources+=("$wasm3_source")
-done < <(find "$WASM3_SOURCE_DIR" -maxdepth 1 -type f -name '*.c' -print | sort)
-if [ "${#wasm3_sources[@]}" -eq 0 ]; then
-    echo "FAIL no wasm3 C sources found in $WASM3_SOURCE_DIR"
+vm_sources=()
+while IFS= read -r vm_source; do
+    vm_sources+=("$vm_source")
+done < <(find "$VM_SOURCE_DIR" -maxdepth 1 -type f -name '*.c' -print | sort)
+if [ "${#vm_sources[@]}" -eq 0 ]; then
+    echo "FAIL no interpreter C sources found in $VM_SOURCE_DIR"
     exit 1
 fi
 
@@ -63,14 +63,11 @@ rm -f "$OUTPUT_JS" "$OUTPUT_WASM"
     -Wall \
     -Wextra \
     -D_GNU_SOURCE \
-    -Dd_m3HasWASI \
-    -Dd_m3RecordBacktraces=1 \
     -I. \
     -I"$WASM_RTOS_DIR" \
-    -I"$WASM3_SOURCE_DIR" \
     os/main.c \
     "${kernel_sources[@]}" \
-    "${wasm3_sources[@]}" \
+    "${vm_sources[@]}" \
     -sWASM=1 \
     -sALLOW_MEMORY_GROWTH=1 \
     -sNO_EXIT_RUNTIME=1 \

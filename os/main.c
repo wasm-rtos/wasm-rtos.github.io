@@ -2,7 +2,7 @@
  * Browser entry point for wasm-rtos.
  *
  * Build this file with Emscripten together with the kernel sources in
- * os/wasm-rtos and wasm3. It supplies the kernel clock port from the
+ * os/wasm-rtos and its interpreter, os/wasm-rtos/vm. It supplies the kernel clock port from the
  * browser's clock, a GPIO port for the parts drawn on the page, a display
  * port that paints into framebuffers the page shows, input devices the page
  * reports to, I2C and SPI ports with models of the chips on the buses, and
