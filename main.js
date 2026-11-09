@@ -74,7 +74,7 @@ const statusIcons = {
 // Parts catalogue. The processor, the LED and the button are wired to the kernel.
 // The catalog; a part is on the board when the device profile places it (by id).
 const PARTS = [
-  { category: 'Processor', id: CPU_NODE_ID, name: 'WASM CPU', meta: 'wasm-rtos · wasm3', icon: 'CPU' },
+  { category: 'Processor', id: CPU_NODE_ID, name: 'WASM CPU', meta: 'wasm-rtos · wasm-rtos-vm', icon: 'CPU' },
   { category: 'Devices', id: 'watch', name: 'Watch', meta: 'Round 240×240 · bezel · 2 buttons · touch', icon: 'WCH' },
   { category: 'Displays', id: 'gc9a01', name: 'GC9A01', meta: 'Round TFT 240×240 · spi0 · CS GPIO5, DC GPIO4', icon: 'TFT' },
   { category: 'Displays', id: 'ssd1306', name: 'SSD1306', meta: 'OLED 128×64 · 1-bit · "main"', icon: 'OLD' },
@@ -1940,7 +1940,7 @@ function createCpuNode() {
       title.className = 'chip-title';
       title.textContent = 'WASM CPU';
       subtitle.className = 'chip-subtitle';
-      subtitle.textContent = 'wasm-rtos · wasm3';
+      subtitle.textContent = 'wasm-rtos · wasm-rtos-vm';
       stats.className = 'chip-stats';
       hint.className = 'chip-drop-hint';
       hint.textContent = 'drop .wasm to run';

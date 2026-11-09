@@ -40,20 +40,20 @@ jobs:
           fetch-depth: 0
           submodules: false
 
-      - name: Update wasm-rtos and nested wasm3 submodules
+      - name: Update wasm-rtos and nested vm submodules
         run: |
           git submodule sync --recursive
           git submodule update --init --remote --recursive
           git submodule status --recursive
 
           test -f os/wasm-rtos/os.c
-          test -f os/wasm-rtos/wasm3/source/wasm3.h
+          test -f os/wasm-rtos/vm/source/wm.h
 
           echo "wasm-rtos commit: $(git -C os/wasm-rtos rev-parse HEAD)"
-          echo "wasm3 commit: $(git -C os/wasm-rtos/wasm3 rev-parse HEAD)"
+          echo "vm commit: $(git -C os/wasm-rtos/vm rev-parse HEAD)"
 
-          if ! git -C os/wasm-rtos diff --quiet -- wasm3; then
-            echo "::warning::The nested wasm3 checkout is newer than the gitlink recorded by wasm-rtos. It is used by this build, but must be committed in the wasm-rtos repository to become permanent."
+          if ! git -C os/wasm-rtos diff --quiet -- vm; then
+            echo "::warning::The nested vm checkout is newer than the gitlink recorded by wasm-rtos. It is used by this build, but must be committed in the wasm-rtos repository to become permanent."
           fi
 
       - name: Validate site JavaScript
