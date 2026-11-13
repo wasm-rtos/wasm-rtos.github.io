@@ -411,6 +411,10 @@ button:disabled { cursor: default; opacity: .45; }
   border-top: 1px solid var(--gray-0);
 }
 .files-run { flex: 1; }
+/* With a board connected the bar gains its buttons: they wrap onto a row of their own. */
+.files-actions { flex-wrap: wrap; }
+#filesRunOnBoard, #filesPutOnCard, #filesRunOnBoth { flex: 1 1 30%; min-width: 0; padding: 0 6px; }
+.files-actions .button[hidden] { display: none; }
 .button:disabled { opacity: .45; cursor: default; }
 .button:disabled:hover { background: var(--control-bg); }
 

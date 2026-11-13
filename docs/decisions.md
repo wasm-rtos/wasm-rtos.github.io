@@ -335,3 +335,79 @@ Checked (2026-11-13), the tour example on the ESP32:
 The protocol first took so much RAM that the tour's child no longer fit;
 answers now go straight where their question waits, and commands are
 small.
+
+## 4. One program, the same on a board and here
+
+**Decided and built (2026-11-13).**
+
+### Problem
+
+Version 1.0 means: a `.wasm` built with an ordinary toolchain starts as a
+program on a real ESP32 and on this page, and behaves the same. Both have
+run programs, but never the same file side by side with their output
+compared; and the page's examples need a display or sensors the board
+does not have.
+
+### Decision
+
+**One example, `examples/tour.c`,** a plain WASI program in C using only
+what both have: the dev board's `"led"` (GPIO2) and `"button-a"` (GPIO0),
+which on an ESP32 dev kit are its LED and BOOT button, the files under
+`/sd`, the console, the clock, memory and processes. It prints one line per
+check, and only what must be the same everywhere:
+
+| Check | Line |
+|---|---|
+| its own file, `/sd/examples/tour.wasm`, read and summed | its size and CRC-32 |
+| a computation | primes below 20000: 2262 |
+| 256 KB of memory written and read back (paged on the ESP32) | `memory 256 KB: ok` |
+| the LED blinked 10 times every 100 ms on the program's clock | `led: 10 blinks, on time` (within 5%) |
+| a child process: the same file with the argument `child` | `child exited with 42` |
+| the button pressed within 10 s, seen as an edge | `button: pressed` or `button: not pressed` |
+| — | `tour done` |
+
+Timings the program checks itself and prints only the verdict: they
+differ by nature on a 240 MHz chip and in a browser.
+
+**Compared by the page.** With a board connected (decision 3), **Run on
+both** starts the selected program in the simulator and on the board at
+once, collects each one's own lines, and when both have ended says whether
+they are the same, or which lines differ. The board runs the same file:
+the page's own, read over the cable.
+
+The board runs the ESP32 port, kept with the board tests and not
+published.
+
+### Why
+
+- The 1.0 promise is about one file behaving the same; the check has to
+  use one file and compare what it says.
+- A program that needs nothing but a pin and a button runs on any board
+  with an LED and a button, which is the point of names over pin numbers.
+- Comparing on the page needs nothing but the page and the cable, and is
+  the check anyone with a board can repeat.
+
+### Instead
+
+- **Output that includes timings**: different by nature; the program
+  judges them itself.
+- **A display on the board**: none is attached; a later example once one
+  is.
+- **Comparing logs by hand or with a script**: kept for the board tests,
+  but the page is where the promise is seen.
+
+### Work, all of it
+
+| # | What | Where | Status |
+|---|---|---|---|
+| 1 | `examples/tour.c` and its `.wasm`; it appears under `/sd/examples` like the others | `examples/`, `main.js` | done |
+| 2 | Run on both: the simulator and the board, each program's own lines, compared when both end | `board.js`, `index.html` | done |
+| 3 | The page and the board, the ESP32 chip on the page and the card in the board, the button pressed on both: the same lines | | done |
+| 4 | README: the example, Run on both | `README.md` | done |
+
+Checked (2026-11-13): the tour, `tour.wasm` of 40 524 bytes (crc32
+`95ef8f90`), on an ESP32-D0WDQ6 with its card and on this page with the
+ESP32 chip, the button not pressed on either: the same eight lines, from
+the file's crc to `tour done`. Run on both, against a fake board printing
+the same lines, says "the same output, 8 lines", and a line changed shows
+with both versions.

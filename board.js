@@ -23,6 +23,7 @@ const boardLink = {
   nextId: 1,
   frames: new Map(),   // the board's memory frames by slot, while it has no card
   programs: new Map(), // task id -> { path, status }
+  lines: new Map(),    // task id -> the lines it printed, kept for Run on both
   stores: [],          // the board's page stores: { name, priority, slots, used, writes, reads }
   helloTimer: 0,
   storesTimer: 0,
@@ -36,6 +37,8 @@ const boardPrograms = document.querySelector('#boardPrograms');
 const boardStores = document.querySelector('#boardStores');
 const filesRunOnBoard = document.querySelector('#filesRunOnBoard');
 const filesPutOnCard = document.querySelector('#filesPutOnCard');
+const filesRunOnBoth = document.querySelector('#filesRunOnBoth');
+const boardCompare = document.querySelector('#boardCompare');
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n;
@@ -154,7 +157,10 @@ function boardPacket(type, id, slot, payload) {
       `pages on the ${words.pages}`);
     renderBoard();
   } else if (type === BOARD.CONSOLE) {
-    appendLog(`board task_${slot}: ${decoder.decode(payload)}`);
+    const line = decoder.decode(payload);
+    appendLog(`board task_${slot}: ${line}`);
+    if (!boardLink.lines.has(slot)) boardLink.lines.set(slot, []);
+    boardLink.lines.get(slot).push(line);
   } else if (type === BOARD.RESULT) {
     const resolve = boardLink.pending.get(id);
     boardLink.pending.delete(id);
@@ -253,19 +259,66 @@ function boardPathFor(path) {
   return boardLink.info && boardLink.info.files === '/pc' ? `/pc${path.slice(FS_ROOT.length)}` : path;
 }
 
+// Starts a program of the page's files on the board; its task id, or 0.
 async function runOnBoard(path) {
-  if (!boardLink.info) return;
+  if (!boardLink.info) return 0;
   const boardPath = boardPathFor(path);
   try {
     const { status, text } = await boardCommand(BOARD.RUN, 0, encoder.encode(boardPath));
     if (status) throw new Error(text);
     const id = Number(text);
     boardLink.programs.set(id, { path: boardPath, status: 'Running' });
+    boardLink.lines.set(id, []);
     appendLog(`Started ${boardPath} on the board as task_${id}`);
     renderBoard();
+    return id;
   } catch (error) {
     appendLog(`Cannot start ${boardPath} on the board: ${error.message}`);
+    return 0;
   }
+}
+
+/*
+ * Run on both (decision 4): the same file in the simulator and on the board at once; when both have
+ * ended, their own lines compared, one by one.
+ */
+async function runOnBoth(path) {
+  const pageTask = runProgram(path);
+  const boardId = await runOnBoard(path);
+  if (!pageTask || !boardId || pageTask.status === 'Failed') {
+    showCompare('Run on both: it did not start in both places');
+    return;
+  }
+  showCompare(`Comparing ${baseName(path)}: on the page ${pageTask.id}, on the board task_${boardId}…`);
+  const ended = (status) => ['Completed', 'Failed', 'Stopped'].includes(status);
+  const timer = setInterval(() => {
+    const board = boardLink.programs.get(boardId);
+    if (!boardLink.port) {
+      clearInterval(timer);
+      showCompare('Run on both: the board went away before the program ended');
+      return;
+    }
+    if (!ended(pageTask.status) || !board || board.status === 'Running') return;
+    clearInterval(timer);
+    showCompare(compareLines(pageTask.output, boardLink.lines.get(boardId) || []));
+  }, 500);
+}
+
+function compareLines(page, board) {
+  const length = Math.max(page.length, board.length);
+  const differ = [];
+  for (let i = 0; i < length; i++) {
+    if (page[i] !== board[i]) differ.push(`line ${i + 1}: page «${page[i] ?? '—'}», board «${board[i] ?? '—'}»`);
+  }
+  return differ.length
+    ? `Run on both: ${differ.length} of ${length} lines differ. ${differ.join('; ')}`
+    : `Run on both: the same output, ${length} lines`;
+}
+
+function showCompare(text) {
+  boardCompare.hidden = false;
+  boardCompare.textContent = text;
+  appendLog(text);
 }
 
 async function stopOnBoard(id) {
@@ -387,6 +440,8 @@ function renderBoard() {
   filesRunOnBoard.disabled = !wasm;
   filesPutOnCard.hidden = !info || info.card !== '1';
   filesPutOnCard.disabled = !wasm;
+  filesRunOnBoth.hidden = !info;
+  filesRunOnBoth.disabled = !wasm;
 }
 
 if ('serial' in navigator) {
@@ -394,6 +449,7 @@ if ('serial' in navigator) {
   boardButton.addEventListener('click', connectBoard);
   filesRunOnBoard.addEventListener('click', () => runOnBoard(selectedPath));
   filesPutOnCard.addEventListener('click', () => putOnCard(selectedPath));
+  filesRunOnBoth.addEventListener('click', () => runOnBoth(selectedPath));
   // The Files panel's selection changes the buttons.
   document.querySelector('#filesList').addEventListener('click', () => setTimeout(renderBoard, 0));
 }

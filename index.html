@@ -115,6 +115,7 @@
           <button id="filesRun" class="button files-run" type="button" disabled>Run</button>
           <button id="filesRunOnBoard" class="button files-run" type="button" hidden disabled title="Start it on the board, from the page's files">Run on board</button>
           <button id="filesPutOnCard" class="button files-run" type="button" hidden disabled title="Copy it to the board's SD card, at the same path">Put on card</button>
+          <button id="filesRunOnBoth" class="button files-run" type="button" hidden disabled title="Start it here and on the board at once, and compare what they print">Run on both</button>
           <button id="filesAdd" class="icon-button" type="button" title="Add files to this folder" aria-label="Add files to this folder">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 2.5h6l3 3v12h-9z M11.5 2.5v3h3 M10 9v6 M7 12h6"/></svg>
           </button>
@@ -178,6 +179,7 @@
           <p class="props-note">Page stores, by priority: the higher takes the next frame.</p>
           <ul id="boardStores" class="board-programs board-stores"></ul>
           <ul id="boardPrograms" class="board-programs"></ul>
+          <p id="boardCompare" class="props-note" hidden></p>
         </details>
 
         <details class="section" open>
