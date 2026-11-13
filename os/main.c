@@ -1495,6 +1495,18 @@ double browser_fs_file_size(const char* path)
     return (double)stat.size;
 }
 
+/*
+ * The bytes of a file in the page's store (a path relative to /sd, as the
+ * store keeps it), or NULL: for a board on the serial cable reading the
+ * page's files. Its size is browser_fs_file_size's.
+ */
+EMSCRIPTEN_KEEPALIVE
+const uint8_t* browser_fs_file_data(const char* relative)
+{
+    BrowserFile* file = relative != NULL ? browser_file_find(relative) : NULL;
+    return file != NULL ? file->data : NULL;
+}
+
 static void browser_clock_start(void)
 {
     g_start_time_ms = emscripten_get_now();

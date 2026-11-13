@@ -225,3 +225,113 @@ short loop at start (10.6 ms, 9.6 ms) is not its time while programs page
 | 4 | Heap in the Processor panel: free, largest block, per region | `main.js`, `os/main.c` | done |
 | 5 | The check: the tour on the ESP32 preset fails with 20 frames and runs with 16; heap after start compared with the board; every example on both profiles; the earlier browser checks | | done |
 | 6 | README; decision 1's table and Instead point here | `README.md`, `docs/decisions.md` | done |
+
+## 3. A board on the serial cable
+
+**Decided and built (2026-11-13).**
+
+### Problem
+
+A program is written on the page and then has to reach the board: today
+that takes PlatformIO or a script, and what the board prints is read in a
+separate serial monitor. The page cannot see the board at all, so nothing
+on it can be compared with what the board does.
+
+### Decision
+
+**One protocol on the board's serial port, spoken by a script and by the
+page.** The board port (the ESP32 firmware) frames everything it sends and
+receives, so programs' output and the commands' bytes never mix:
+
+```
+0xA5 | type u8 | id u16 | slot u32 | length u16 | payload | crc32 u32
+```
+
+| Type | Way | What |
+|---|---|---|
+| `HELLO` | both | on connect: the protocol version, the chip's frame size, its board and firmware names; then once a second while connected |
+| `CONSOLE` | board → | a line a program wrote; `slot` is its task |
+| `PUT` | → board | a file for the card, 512 bytes a packet, each answered |
+| `RUN`, `KILL`, `LIST`, `PS` | → board | start a program by path with arguments, stop one, list a folder, list the programs |
+| `RESULT` | board → | the answer to a command: status and text; `TASK_ENDED` when a program ends, with its exit code |
+| `FS_STAT`, `FS_READ`, `FS_LIST` | board → | the board reading the computer's files: a file's type and size, up to 4 KB of it at an offset, a folder's entry by index; answered with `FS_ANSWER` |
+| `PAGE_WRITE`, `PAGE_READ` | board → | without a card, a frame of programs' memory kept on the computer and read back (`slot`); answered with `FS_ANSWER` |
+
+`id` pairs an answer with its command. A damaged packet is dropped and its
+command times out; the sender says so. Both ends say `HELLO` once a
+second; after three silent seconds the board takes the cable as gone, and
+what it asks of the computer fails at once.
+
+**No SD card needed.** The board mounts the computer's files (the page's
+Files, or a folder the script serves) as a file system over the cable:
+at `/sd` on a board without a card, at `/pc` on one with a card (whose
+`/sd` stays the card). The kernel reads them like any file: a program
+started from there is read into RAM, as from a card, and it can open its
+own files and start children by path. While a read crosses the cable the
+board waits, as for a card; with the cable gone, reads fail and the
+programs reading see an error.
+
+**On the page:** a Board button in the toolbar (Chrome and Edge, which
+have Web Serial; hidden elsewhere). Once the person picks the port:
+
+- the board's output appears in the Console, each line marked
+  `board task_1:`;
+- a `.wasm` in Files has **Run on board** next to Run: the board starts it
+  from the page's files, without a card (or, with **Put on card**, copies
+  it to the card first, to run without the computer later);
+- a Board section in the Inspector shows the board (its name, firmware,
+  card, where its pages are) and the programs started on it, with Stop.
+
+**The script** (`board.py`, kept with the board tests) speaks the same
+protocol, for checks without a browser.
+
+**The computer as the page store**, on a board without a card: frames go
+over the cable and are kept by the page (or the script) while it is
+connected. The chip waits for each, as for a card, but longer (about 65 ms
+a frame at 921 600 baud, against 13 to 35 ms on the card). With the cable
+gone, the programs whose frames were there end with an error; the board
+and its other programs go on.
+
+### Why
+
+- The page is where programs are made; putting them on the board and
+  reading what it says belong there, with no other tool.
+- Framing keeps text and binary apart, so the same cable can carry
+  frames of memory later without a new protocol.
+- One protocol for the page and the script means a check written once
+  holds for both.
+
+### Instead
+
+- **Plain text lines** (what the firmware spoke before): simple, but a
+  file's bytes or a frame of memory cannot share the line with output.
+- **WebUSB**: needs the board's USB chip to cooperate; the ESP32 kit's
+  CP2102 is a serial bridge, which Web Serial reaches as it is.
+- **Flashing firmware from the page**: possible (esptool-js), left out
+  for now.
+
+### Work, all of it
+
+| # | What | Where | Status |
+|---|---|---|---|
+| 1 | The protocol in the ESP32 port: framing, HELLO, CONSOLE, PUT, RUN, KILL, LIST, PS, RESULT, TASK_ENDED | board tests (local) | done |
+| 2 | The computer's files on the board: an `OsFsDriver` over the cable (FS_STAT, FS_READ, FS_LIST), at `/sd` without a card and `/pc` with one | board tests (local) | done |
+| 3 | The computer as the page store without a card: PAGE_WRITE, PAGE_READ; the cable gone fails at once | board tests (local) | done |
+| 4 | `board.py` on the protocol: put, run, ls, ps, kill, serving a folder and the frames, cutting the cable on purpose | board tests (local) | done |
+| 5 | The page: `board.js` (Web Serial), Board button, console lines, serving Files and frames to the board, Run on board and Put on card, the Board section | `board.js`, `index.html`, `style.css`, `os/main.c` | done |
+| 6 | Checks: below | | done |
+| 7 | README | `README.md` | done |
+
+Checked (2026-11-13), the tour example on the ESP32:
+
+| | Result |
+|---|---|
+| Script, with the card, the tour from the computer (`/pc`), its child from the card | runs; the child shares the program |
+| Script, no card: files and pages from the computer | runs: 74 frames out, 200 in, 40 s; `led: LATE` (the chip waits for frames on the cable) |
+| Script, the computer stops answering in the middle | the tour ends in 3 s with an error; the board runs the next program |
+| The page in Chrome, no card, Run on board (by the user) | runs: the same lines, 25 s |
+| The page against a fake port | every answer's crc, a file's size, bytes and folder, a frame written and read back, a missing frame refused, RUN and TASK_ENDED shown |
+
+The protocol first took so much RAM that the tour's child no longer fit;
+answers now go straight where their question waits, and commands are
+small.

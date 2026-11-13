@@ -93,6 +93,20 @@ other value); chips of your own are kept in the browser, can be copied,
 edited and deleted, and downloaded as a file for someone else to load. The
 Processor panel shows the chip's heap: free, and the largest block.
 
+### A board on the cable
+
+In Chrome and Edge, the Board button (the plug, by the moon) connects a
+board running the wasm-rtos ESP32 port over its serial cable (Web Serial).
+The board's programs then print into the Console, marked `board task_1:`,
+and the board reads the page's files over the cable: at `/sd` on a board
+without an SD card, at `/pc` on one with a card. **Run on board** starts
+the selected program there; **Put on card** copies it to the board's card.
+Without a card the page also keeps the frames of the board's programs'
+memory, so a board with nothing but the cable runs programs larger than
+its RAM, a little slowly; unplugging ends the programs whose frames were
+here. The Board section in the Inspector shows the board and its
+programs, with Stop.
+
 ### Memory
 
 Programs' memory is paged as on a board, in 4 KB frames, through a page
