@@ -2,6 +2,8 @@ const tasks = [];
 let runtime = null;
 let runtimeStartedAt = 0;
 let runtimeFailed = false;
+// The device asleep: when it went to sleep, the saved system, and what wakes it.
+let asleep = null;
 let fuelPerSlice = 10000;
 let fuelRatePerMs = 2400;
 let resumeFuelRatePerMs = 2400;
@@ -40,6 +42,7 @@ const traceTaskOwners = new Map();
 const traceHitRegions = [];
 
 const OS_STATUS_OK = 0;
+const FRAME_SIZE = 4096; // a frame of programs' memory, as the runtime pages it
 const OS_TASK_READY = 0;
 const OS_TASK_RUNNING = 1;
 const OS_TASK_WAITING = 2;
@@ -97,6 +100,8 @@ const busLog = document.querySelector('#busLog');
 const runtimeStatus = document.querySelector('#runtimeStatus');
 const runtimeStatusDetail = document.querySelector('#runtimeStatusDetail');
 const memoryValue = document.querySelector('#memoryValue');
+const pagingValue = document.querySelector('#pagingValue');
+const pageStoreValue = document.querySelector('#pageStoreValue');
 const deviceSelect = document.querySelector('#deviceSelect');
 const programSection = document.querySelector('#programSection');
 const programTitle = document.querySelector('#programTitle');
@@ -107,6 +112,8 @@ const fileInput = document.querySelector('#wasmFile');
 const pageDropOverlay = document.querySelector('#pageDropOverlay');
 const loadButton = document.querySelector('#loadButton');
 const runButton = document.querySelector('#runButton');
+const sleepButton = document.querySelector('#sleepButton');
+const startFreshButton = document.querySelector('#startFreshButton');
 const newTaskButton = document.querySelector('#newTaskButton');
 const fuelRateSlider = document.querySelector('#fuelRateSlider');
 const fuelRateInput = document.querySelector('#fuelRateInput');
@@ -292,8 +299,12 @@ function updateFuelTelemetry() {
 }
 
 function renderRunState() {
-  const mode = runtimeFailed ? 'error' : !runtime ? 'load' : fuelRatePerMs === 0 ? 'pause' : 'run';
-  const label = { error: 'ERR', load: 'LOAD', pause: 'PAUSE', run: 'RUN' }[mode];
+  const mode = runtimeFailed ? 'error' : !runtime ? 'load' : asleep ? 'sleep' : fuelRatePerMs === 0 ? 'pause' : 'run';
+  const label = { error: 'ERR', load: 'LOAD', sleep: 'SLEEP', pause: 'PAUSE', run: 'RUN' }[mode];
+  sleepButton.setAttribute('aria-pressed', asleep ? 'true' : 'false');
+  startFreshButton.hidden = !asleep;
+  sleepButton.disabled = !runtime;
+  document.querySelector('#boardLayer').classList.toggle('is-asleep', Boolean(asleep));
   lcdState.textContent = label;
   lcdState.parentElement.classList.toggle('is-run', mode === 'run');
   lcdState.parentElement.classList.toggle('is-pause', mode === 'pause');
@@ -944,7 +955,7 @@ function updateCounters() {
   let total = ready + waiting;
   let timers = 0;
 
-  if (runtime) {
+  if (runtime && !asleep) {
     try {
       total = callRuntime('browser_runtime_get_task_count', 'number');
       ready = callRuntime('browser_runtime_get_ready_task_count', 'number');
@@ -966,6 +977,30 @@ function updateCounters() {
   if (runtime && runtime.HEAPU8) {
     const memoryMb = runtime.HEAPU8.buffer.byteLength / (1024 * 1024);
     memoryValue.textContent = `${memoryMb.toFixed(1)} MB`;
+    renderPaging();
+  }
+}
+
+// Paging across all programs: frames in RAM of the budget, and what the page store holds and has moved.
+function renderPaging() {
+  const stats = readPageStats();
+  if (!stats) return;
+  pagingValue.textContent = stats.budget
+    ? `${stats.ram} of ${stats.budget} frames (${formatSize(stats.budget * FRAME_SIZE)})`
+    : `${stats.ram} frames, no budget`;
+  pageStoreValue.textContent = `${stats.stored} frames · ${integerNumberFormat.format(stats.stores)} out, ` +
+    `${integerNumberFormat.format(stats.loads)} in`;
+}
+
+function readPageStats() {
+  const out = runtime._malloc(20);
+  try {
+    if (callRuntime('browser_runtime_get_page_stats', 'number', ['number'], [out]) !== OS_STATUS_OK) return null;
+    const view = new DataView(runtime.HEAPU8.buffer, out, 20);
+    const field = (index) => view.getUint32(index * 4, true);
+    return { ram: field(0), budget: field(1), stored: field(2), stores: field(3), loads: field(4) };
+  } finally {
+    runtime._free(out);
   }
 }
 
@@ -1010,6 +1045,10 @@ function deleteOsTask(task) {
 }
 
 async function handleTaskAction(task, action) {
+  if (asleep) {
+    appendLog(`${task.id}: the device is asleep; wake it first`);
+    return;
+  }
   try {
     if (action === 'pause') {
       const status = callRuntime('browser_task_suspend', 'number', ['number'], [task.osTaskId]);
@@ -1102,16 +1141,17 @@ function swapOut(task) {
 // os_task_get_memory_usage for a task, or null.
 function readTaskMemory(taskId) {
   if (!runtime || !taskId) return null;
-  const out = runtime._malloc(40);
+  const out = runtime._malloc(52);
   try {
     if (callRuntime('browser_task_get_memory_usage', 'number', ['number', 'number'], [taskId, out]) !== OS_STATUS_OK) {
       return null;
     }
-    const view = new DataView(runtime.HEAPU8.buffer, out, 40);
+    const view = new DataView(runtime.HEAPU8.buffer, out, 52);
     const field = (index) => view.getUint32(index * 4, true);
     return {
       stack: field(0), stackPeak: field(1), memory: field(2), code: field(3), interpreter: field(4),
-      interpreterPeak: field(5), image: field(6), swap: field(7), kernel: field(8), total: field(9)
+      interpreterPeak: field(5), image: field(6), swap: field(7), kernel: field(8), total: field(9),
+      resident: field(10), stored: field(11), block: field(12)
     };
   } finally {
     runtime._free(out);
@@ -1168,7 +1208,8 @@ function renderProgram() {
   } else if (memory) {
     const inRam = memory.total;
     add('RAM', formatSize(inRam));
-    add('Memory', formatSize(memory.memory));
+    add('Memory', memory.block ? `${formatSize(memory.memory)}, one block`
+      : `${formatSize(memory.memory)}, paged: ${formatSize(memory.resident)} in RAM, ${formatSize(memory.stored)} stored`);
     add('Stack', memory.stack ? `${formatSize(memory.stackPeak)} of ${formatSize(memory.stack)} used`
       : `${formatSize(memory.stackPeak)} at most`);
     add('Code', formatSize(memory.code));
@@ -1425,6 +1466,10 @@ function writeStoreFile(path, bytes) {
 function runProgram(path) {
   if (!runtime) {
     appendLog(`Cannot start ${path}: runtime is still loading`);
+    return;
+  }
+  if (asleep) {
+    appendLog(`Cannot start ${path}: the device is asleep; wake it first`);
     return;
   }
 
@@ -1991,6 +2036,8 @@ const PROFILE_STORAGE_KEY = 'wasm-rtos.device';
 const DEVICE_PROFILES = {
   devboard: {
     name: 'Dev board',
+    // RAM for programs' memory, in 4 KB frames: what an ESP32 without PSRAM can spare.
+    ramFrames: 20,
     pins: [
       ...Array.from({ length: 8 }, (_, pin) => ({ name: `gpio${pin}`, pin, capabilities: GPIO_CAN_ALL })),
       { name: 'button-a', pin: 0, capabilities: GPIO_CAN_ALL },
@@ -2022,6 +2069,8 @@ const DEVICE_PROFILES = {
   },
   watch: {
     name: 'Watch',
+    // A watch chip with PSRAM: 2 MB.
+    ramFrames: 512,
     pins: [],
     buses: [],
     chips: [],
@@ -2054,7 +2103,191 @@ const deviceProfileId = loadProfileId();
 const DEVICE_PROFILE = DEVICE_PROFILES[deviceProfileId];
 const partView = { leds: [], displays: [], panels: [] };
 
-function applyDeviceProfile() {
+/* ---------- Sleep ---------- */
+
+const GPIO_EDGE_RISING = 0x40;
+const GPIO_EDGE_FALLING = 0x80;
+const NO_DEADLINE = 0xffffffff;
+
+// Save the whole system and power the kernel down, as a board before deep sleep (os_system_save).
+function sleepSystem() {
+  if (!runtime || asleep) return;
+  const out = runtime._malloc(44);
+  const started = performance.now();
+  try {
+    if (callRuntime('browser_system_sleep', 'number', ['number'], [out]) !== OS_STATUS_OK) {
+      appendLog(`Cannot sleep: ${runtimeError()}`);
+      return;
+    }
+    const view = new DataView(runtime.HEAPU8.buffer, out, 44);
+    const field = (index) => view.getUint32(index * 4, true);
+    const stream = concatChunks(runtime.savedSystem);
+    runtime.savedSystem = null;
+    const pins = Array.from({ length: field(2) }, (_, index) => ({ pin: field(3 + index * 2), edges: field(4 + index * 2) }));
+    const wakeInMs = field(1);
+    const at = Date.now();
+    asleep = { at, stream, pins, wakeAt: wakeInMs !== NO_DEADLINE ? at + wakeInMs : null, timer: 0 };
+    armWakeTimer();
+    keepSleep(asleep);
+    const wakes = [
+      wakeInMs !== NO_DEADLINE ? `its timer in ${formatDuration(wakeInMs)}` : null,
+      ...pins.map((wake) => `GPIO${wake.pin}`),
+      'the Wake button'
+    ].filter(Boolean);
+    appendLog(`Asleep: saved the system, ${formatSize(stream.length)}, in ${(performance.now() - started).toFixed(1)} ms; ` +
+      `wakes by ${wakes.join(', ')}`);
+  } finally {
+    runtime._free(out);
+  }
+  runtimeStatus.textContent = 'Asleep';
+  runtimeStatusDetail.textContent = 'The system is saved; the parts keep power';
+  renderRunState();
+  renderTasks();
+}
+
+// A fresh kernel, the device profile again, and the saved system with the time slept (os_system_restore).
+function wakeSystem(cause, pin = NO_DEADLINE, edge = 0) {
+  if (!asleep) return;
+  const sleptMs = Math.max(0, Date.now() - asleep.at);
+  const { stream } = asleep;
+  clearTimeout(asleep.timer);
+  asleep = null;
+  forgetSleep();
+  const started = performance.now();
+  if (callRuntime('browser_system_boot', 'number') !== OS_STATUS_OK) {
+    appendLog(`Cannot wake: ${runtimeError()}`);
+    runtimeFailed = true;
+    renderRunState();
+    return;
+  }
+  applyDeviceProfile({ kernelOnly: true });
+  runtime.savedSystem = stream;
+  const status = callRuntime('browser_system_restore', 'number', ['number', 'number', 'number'], [sleptMs, pin, edge]);
+  if (status !== OS_STATUS_OK) {
+    appendLog(`Woke by ${cause}, but the saved system did not restore: ${runtimeError()}. Started afresh.`);
+    tasks.forEach((task) => { if (!['Completed', 'Failed', 'Stopped'].includes(task.status)) task.status = 'Stopped'; });
+  } else {
+    appendLog(`Woke by ${cause} after ${formatDuration(sleptMs)} asleep; restored in ${(performance.now() - started).toFixed(1)} ms`);
+  }
+  runtimeStatus.textContent = 'Running';
+  runtimeStatusDetail.textContent = 'wasm-rtos is ready';
+  renderRunState();
+  refreshRuntimeState();
+  renderTasks();
+}
+
+function armWakeTimer() {
+  if (asleep.wakeAt !== null) asleep.timer = setTimeout(() => wakeSystem('its timer'), Math.max(0, asleep.wakeAt - Date.now()));
+}
+
+// A sleep survives a reload: the saved system, the parts' state and the program list go to IndexedDB.
+const SYSTEM_DB_NAME = 'wasm-rtos-system';
+const SYSTEM_DB_STORE = 'sleep';
+
+function withSystemStore(mode, fill) {
+  return new Promise((resolve, reject) => {
+    let request;
+    try {
+      request = indexedDB.open(SYSTEM_DB_NAME, 1);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    request.onupgradeneeded = () => request.result.createObjectStore(SYSTEM_DB_STORE);
+    request.onerror = () => reject(request.error || new Error('browser storage is unavailable'));
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction(SYSTEM_DB_STORE, mode);
+      const read = fill(transaction.objectStore(SYSTEM_DB_STORE));
+      transaction.oncomplete = () => { db.close(); resolve(read && read.result); };
+      transaction.onerror = () => { db.close(); reject(transaction.error); };
+    };
+  });
+}
+
+function keepSleep(sleeping) {
+  const size = callRuntime('browser_board_state_size', 'number');
+  const pointer = runtime._malloc(size);
+  callRuntime('browser_board_state_write', null, ['number'], [pointer]);
+  const board = runtime.HEAPU8.slice(pointer, pointer + size);
+  runtime._free(pointer);
+  const record = {
+    build: callRuntime('browser_build_id', 'string'),
+    profile: deviceProfileId,
+    at: sleeping.at,
+    wakeAt: sleeping.wakeAt,
+    pins: sleeping.pins,
+    stream: sleeping.stream,
+    board,
+    tasks: tasks.map(({ localId, id, app, path, status, priority, osTaskId, runCount, output, traceColor }) =>
+      ({ localId, id, app, path, status, priority, osTaskId, runCount, output: output.slice(-200), traceColor }))
+  };
+  withSystemStore('readwrite', (store) => store.put(record, 'system'))
+    .catch((error) => appendLog(`The sleep will not survive a reload: ${error.message}`));
+}
+
+function forgetSleep() {
+  return withSystemStore('readwrite', (store) => store.delete('system')).catch(() => {});
+}
+
+// After a reload: a device that was asleep sleeps on, with its parts as they were, until something wakes it.
+async function resumeSleep() {
+  let record;
+  try {
+    record = await withSystemStore('readonly', (store) => store.get('system'));
+  } catch (error) {
+    return;
+  }
+  if (!record) return;
+  if (record.build !== callRuntime('browser_build_id', 'string') || record.profile !== deviceProfileId) {
+    await forgetSleep();
+    appendLog(`A saved system from ${record.profile !== deviceProfileId ? 'another device' : 'another runtime build'} ` +
+      'was thrown away; the device starts afresh');
+    return;
+  }
+  const pointer = runtime._malloc(record.board.length);
+  runtime.HEAPU8.set(record.board, pointer);
+  const status = callRuntime('browser_board_state_read', 'number', ['number', 'number'], [pointer, record.board.length]);
+  runtime._free(pointer);
+  if (status !== OS_STATUS_OK) {
+    await forgetSleep();
+    appendLog('A saved system did not fit the board\'s parts and was thrown away; the device starts afresh');
+    return;
+  }
+  callRuntime('browser_system_power_down', null);
+  record.tasks.forEach((saved) => tasks.push({ ...saved, lastRunAt: 0, activityUntil: 0, outputVersion: 1 }));
+  asleep = { at: record.at, stream: record.stream, pins: record.pins, wakeAt: record.wakeAt, timer: 0 };
+  armWakeTimer();
+  const wakes = [
+    record.wakeAt !== null ? `its timer ${record.wakeAt <= Date.now() ? 'now' : `in ${formatDuration(record.wakeAt - Date.now())}`}` : null,
+    ...record.pins.map((wake) => `GPIO${wake.pin}`),
+    'the Wake button'
+  ].filter(Boolean);
+  appendLog(`Asleep since ${new Date(record.at).toLocaleTimeString()} (saved before the reload, ` +
+    `${formatSize(record.stream.length)}); wakes by ${wakes.join(', ')}`);
+  runtimeStatus.textContent = 'Asleep';
+  runtimeStatusDetail.textContent = 'The system is saved; the parts keep power';
+}
+
+async function startFresh() {
+  if (asleep) clearTimeout(asleep.timer);
+  await forgetSleep();
+  window.location.reload();
+}
+
+function concatChunks(chunks) {
+  const stream = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
+  let at = 0;
+  chunks.forEach((chunk) => { stream.set(chunk, at); at += chunk.length; });
+  return stream;
+}
+
+function formatDuration(ms) {
+  return ms < 1000 ? `${Math.round(ms)} ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)} s` : `${(ms / 60000).toFixed(1)} min`;
+}
+
+// The kernel's side of the profile is registered at every start; the parts on the board only at power-on.
+function applyDeviceProfile({ kernelOnly = false } = {}) {
   DEVICE_PROFILE.pins.forEach(({ name, pin, capabilities, options = 0 }) => {
     const status = callRuntime('browser_gpio_add_pin', 'number', ['string', 'number', 'number', 'number'],
       [name, pin, capabilities, options]);
@@ -2072,7 +2305,7 @@ function applyDeviceProfile() {
     const status = callRuntime(`browser_${bus.kind}_add_bus`, 'number', ['string', 'number', 'number'], [bus.name, bus.number, bus.hz]);
     if (status !== OS_STATUS_OK) throw new Error(`bus ${bus.name}: ${runtimeError()}`);
   });
-  DEVICE_PROFILE.chips.forEach((chip) => {
+  if (!kernelOnly) DEVICE_PROFILE.chips.forEach((chip) => {
     chip.runtimeId = chip.type === 'lm75'
       ? callRuntime('browser_chip_add_lm75', 'number', ['number', 'number', 'number'], [chip.bus, chip.address, Math.round(chip.celsius * 1000)])
       : callRuntime('browser_chip_add_gc9a01', 'number', ['number', 'number', 'number', 'number', 'number'],
@@ -2155,6 +2388,10 @@ function createButton(part) {
     event.stopPropagation();
     button.classList.toggle('is-pressed', down);
     if (runtime) callRuntime('browser_gpio_ground', null, ['number', 'number'], [part.pin, down ? 1 : 0]);
+    // A pin a program watches wakes the board on the edge it waits for: pressing pulls it low.
+    const edge = down ? GPIO_EDGE_FALLING : GPIO_EDGE_RISING;
+    const waker = asleep && asleep.pins.find((wake) => wake.pin === part.pin && (wake.edges & edge));
+    if (waker) wakeSystem(`GPIO${part.pin}`, part.pin, edge);
   };
   button.type = 'button';
   button.className = 'part-button';
@@ -2554,6 +2791,8 @@ function syncPanelsToViewport() {
 window.matchMedia('(max-width: 900px)').addEventListener('change', syncPanelsToViewport);
 
 runButton.addEventListener('click', toggleRun);
+sleepButton.addEventListener('click', () => (asleep ? wakeSystem('the Wake button') : sleepSystem()));
+startFreshButton.addEventListener('click', startFresh);
 
 document.addEventListener('keydown', (event) => {
   if (event.target.closest('input, textarea, select, button, [contenteditable]')) return;
@@ -2564,6 +2803,7 @@ document.addEventListener('keydown', (event) => {
   else if (key === 'i') togglePanel('inspector');
   else if (key === 'e') togglePanel('editor');
   else if (key === 'o') openPicker();
+  else if (key === 'z' && runtime) (asleep ? wakeSystem('the Wake button') : sleepSystem());
   else return;
   event.preventDefault();
 });
@@ -2638,7 +2878,7 @@ try {
 /* ---------- Runtime lifecycle ---------- */
 
 function refreshRuntimeState() {
-  if (!runtime) return;
+  if (!runtime || asleep) return;
   const sampledAt = performance.now();
   tasks.forEach((task) => {
     if (task.osTaskId) {
@@ -2693,6 +2933,9 @@ async function initializeRuntime() {
     });
     const status = callRuntime('browser_runtime_init', 'number', [], []);
     if (status !== OS_STATUS_OK) throw new Error(runtimeError());
+    if (callRuntime('browser_runtime_set_ram_frames', 'number', ['number'], [DEVICE_PROFILE.ramFrames]) !== OS_STATUS_OK) {
+      throw new Error(runtimeError());
+    }
     applyDeviceProfile();
     fuelPerSlice = callRuntime('browser_runtime_get_fuel_per_slice', 'number') || fuelPerSlice;
     setFuelRate(fuelRatePerMs);
@@ -2703,6 +2946,7 @@ async function initializeRuntime() {
     appendLog(`wasm-rtos initialized · ${DEVICE_PROFILE.name} · files mounted at ${FS_ROOT}`);
     await restoreSavedFiles();
     await addExamples();
+    await resumeSleep();
   } catch (error) {
     runtime = null;
     runtimeFailed = true;

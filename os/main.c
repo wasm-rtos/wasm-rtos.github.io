@@ -14,6 +14,7 @@
 
 #include <emscripten/emscripten.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,11 @@
 #define BROWSER_TRACE_EVENT_CAPACITY 4096U
 /* Dropped files appear here, like an SD card on a board. */
 #define BROWSER_FS_MOUNT "/sd"
+/* Frames of programs' memory and the slots of the page store (64 MiB). */
+#define BROWSER_FRAME_SIZE 4096U
+#define BROWSER_PAGE_SLOTS 16384U
+/* Tasks the page follows after a wake. */
+#define BROWSER_MAX_TASKS 64U
 /* Pins GPIO0..GPIO7 of the simulated board. */
 #define BROWSER_GPIO_PINS 8U
 /* Displays a device profile may have (OS_DISPLAY_MAX). */
@@ -103,10 +109,17 @@ static const OsGpioPort g_browser_gpio_port =
     NULL, browser_gpio_configure, browser_gpio_write, browser_gpio_read
 };
 
-/* The page registers the pins of its device profile (browser_gpio_add_pin). */
-static OsStatus browser_gpio_start(void)
+/*
+ * The page registers the pins of its device profile (browser_gpio_add_pin).
+ * After a sleep the board keeps what it had: the parts keep power, and the
+ * kernel sets its pins up again as the programs left them.
+ */
+static OsStatus browser_gpio_start(int fresh)
 {
-    memset(&g_board, 0, sizeof(g_board));
+    if (fresh)
+    {
+        memset(&g_board, 0, sizeof(g_board));
+    }
     return os_gpio_port_set(&g_browser_gpio_port);
 }
 
@@ -743,48 +756,45 @@ static void browser_chips_free_all(void)
 }
 
 /*
- * Swap storage outside the runtime's own memory: images live in JavaScript,
- * so swapping a program out really gives its memory back to the runtime.
+ * The page store: frames live in JavaScript, one Uint8Array per slot, so a
+ * frame sent out really leaves the runtime's memory. The page has one
+ * thread and a frame copy takes microseconds, so reads and writes finish in
+ * the call (docs/decisions.md, 1).
  */
-EM_JS(int, browser_swap_write_js, (uint32_t task_id, uint32_t offset, const void* data, uint32_t size), {
-    const images = Module.swapImages || (Module.swapImages = new Map());
-    let image = images.get(task_id) || new Uint8Array(0);
-    if (offset !== image.length) return 1;
-    const grown = new Uint8Array(image.length + size);
-    grown.set(image);
-    grown.set(HEAPU8.subarray(data, data + size), image.length);
-    images.set(task_id, grown);
+EM_JS(void, browser_page_write_js, (uint32_t slot, const void* frame, uint32_t size), {
+    const slots = Module.pageSlots || (Module.pageSlots = new Map());
+    slots.set(slot, HEAPU8.slice(frame, frame + size));
+});
+
+EM_JS(int, browser_page_read_js, (uint32_t slot, void* frame, uint32_t size), {
+    const stored = Module.pageSlots && Module.pageSlots.get(slot);
+    if (!stored || stored.length !== size) return 1;
+    HEAPU8.set(stored, frame);
     return 0;
 });
 
-EM_JS(int, browser_swap_read_js, (uint32_t task_id, uint32_t offset, void* data, uint32_t size), {
-    const image = Module.swapImages && Module.swapImages.get(task_id);
-    if (!image || offset + size > image.length) return 1;
-    HEAPU8.set(image.subarray(offset, offset + size), data);
-    return 0;
+EM_JS(void, browser_page_clear_js, (void), {
+    if (Module.pageSlots) Module.pageSlots.clear();
 });
 
-EM_JS(void, browser_swap_discard_js, (uint32_t task_id), {
-    if (Module.swapImages) Module.swapImages.delete(task_id);
-});
-
-static OsStatus browser_swap_write(void* context, uint32_t task_id, uint32_t offset, const void* data, uint32_t size)
+static OsStatus browser_page_write(void* context, uint32_t slot, const void* frame)
 {
     (void)context;
-    return browser_swap_write_js(task_id, offset, data, size) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
+    browser_page_write_js(slot, frame, BROWSER_FRAME_SIZE);
+    return OS_STATUS_OK;
 }
 
-static OsStatus browser_swap_read(void* context, uint32_t task_id, uint32_t offset, void* data, uint32_t size)
+static OsStatus browser_page_read(void* context, uint32_t slot, void* frame)
 {
     (void)context;
-    return browser_swap_read_js(task_id, offset, data, size) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
+    return browser_page_read_js(slot, frame, BROWSER_FRAME_SIZE) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
 }
 
-static void browser_swap_discard(void* context, uint32_t task_id)
+/* The device profile sets ram_frames before the first program starts. */
+static OsPageStore g_browser_page_store =
 {
-    (void)context;
-    browser_swap_discard_js(task_id);
-}
+    NULL, BROWSER_PAGE_SLOTS, 0U, browser_page_write, browser_page_read, NULL, NULL, NULL, NULL
+};
 
 /* The page keeps a log per program; it gets the bytes as written. */
 EM_JS(void, browser_output_to_page, (uint32_t task_id, uint32_t fd, const void* data, uint32_t size), {
@@ -802,11 +812,6 @@ static void browser_output_write(void* context, uint32_t task_id, uint32_t fd, c
 static const OsOutputPort g_browser_output_port =
 {
     NULL, browser_output_write
-};
-
-static const OsSwapPort g_browser_swap_port =
-{
-    NULL, browser_swap_write, browser_swap_read, browser_swap_discard
 };
 
 typedef struct BrowserTaskRecord
@@ -838,6 +843,8 @@ static BrowserTraceEvent g_trace_events[BROWSER_TRACE_EVENT_CAPACITY];
 static uint32_t g_trace_next_sequence = 1U;
 static uint32_t g_trace_event_count;
 static int g_runtime_initialized;
+/* Asleep: the system is saved in the page and the kernel is down. */
+static int g_asleep;
 static char g_error_message[BROWSER_ERROR_MESSAGE_SIZE];
 
 static double browser_elapsed_now_ms(void)
@@ -860,7 +867,7 @@ static uint32_t browser_clock_now_ms(void* context)
 
 static BrowserTaskRecord* browser_find_record(uint32_t task_id)
 {
-    BrowserTaskRecord* record = g_task_records;
+    BrowserTaskRecord* record = g_asleep ? NULL : g_task_records;
 
     while (record != NULL)
     {
@@ -1455,25 +1462,23 @@ static uint32_t browser_time_ms(void)
     return (uint32_t)browser_elapsed_now_ms();
 }
 
-EMSCRIPTEN_KEEPALIVE
-int browser_runtime_init(void)
+/*
+ * The kernel and its ports, as at every start of the board. fresh: a power-on
+ * (the board's parts start afresh too); else a wake from sleep, where the
+ * parts keep their state and the page registers the device profile again.
+ */
+static OsStatus browser_kernel_start(int fresh)
 {
     OsClockPort clock_port;
     OsStatus status;
 
-    if (g_runtime_initialized)
-    {
-        return (int)OS_STATUS_OK;
-    }
-
-    browser_clear_error();
     browser_clock_start();
     status = os_init();
     if (status != OS_STATUS_OK)
     {
         browser_set_error("os_init", status);
         browser_clock_stop();
-        return (int)status;
+        return status;
     }
 
     status = os_fs_mount(BROWSER_FS_MOUNT, &g_browser_fs_driver, NULL);
@@ -1482,7 +1487,7 @@ int browser_runtime_init(void)
         browser_set_error("os_fs_mount", status);
         os_shutdown();
         browser_clock_stop();
-        return (int)status;
+        return status;
     }
 
     g_clock_now_ms = browser_time_ms();
@@ -1496,13 +1501,14 @@ int browser_runtime_init(void)
         browser_set_error("os_clock_port_set", status);
         os_shutdown();
         browser_clock_stop();
-        return (int)status;
+        return status;
     }
 
-    status = browser_gpio_start();
+    status = browser_gpio_start(fresh);
     if (status == OS_STATUS_OK)
     {
-        status = os_swap_port_set(&g_browser_swap_port);
+        browser_page_clear_js();
+        status = os_page_store_set(&g_browser_page_store);
     }
     if (status == OS_STATUS_OK)
     {
@@ -1529,14 +1535,369 @@ int browser_runtime_init(void)
         browser_set_error("browser_runtime_init", status);
         os_shutdown();
         browser_clock_stop();
-        return (int)status;
+        return status;
     }
 
     g_runtime_initialized = 1;
+    g_asleep = 0;
     g_last_budget_time_ms = g_clock_now_ms;
     g_fuel_budget = 0.0;
     g_scheduled_slice_count = 0U;
     browser_trace_reset();
+    return OS_STATUS_OK;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int browser_runtime_init(void)
+{
+    if (g_runtime_initialized)
+    {
+        return (int)OS_STATUS_OK;
+    }
+    browser_clear_error();
+    return (int)browser_kernel_start(1);
+}
+
+/* ---------------------------------------------------------------------------
+ * Sleep: the whole system saved to the page, the kernel shut down, and
+ * restored into a fresh kernel when the board wakes (docs/decisions.md, 1).
+ * ------------------------------------------------------------------------ */
+
+EM_JS(void, browser_system_reset_js, (void), {
+    Module.savedSystem = [];
+});
+
+EM_JS(void, browser_system_append_js, (const void* data, uint32_t size), {
+    Module.savedSystem.push(HEAPU8.slice(data, data + size));
+});
+
+/* Reads the next bytes of Module.savedSystem (a Uint8Array, set by the page). */
+EM_JS(void, browser_system_rewind_js, (void), {
+    Module.savedSystemAt = 0;
+});
+
+EM_JS(void, browser_system_drop_js, (void), {
+    Module.savedSystem = null;
+});
+
+EM_JS(int, browser_system_take_js, (void* data, uint32_t size), {
+    const stream = Module.savedSystem;
+    const at = Module.savedSystemAt || 0;
+    if (!(stream instanceof Uint8Array) || at + size > stream.length) return 1;
+    HEAPU8.set(stream.subarray(at, at + size), data);
+    Module.savedSystemAt = at + size;
+    return 0;
+});
+
+static OsStatus browser_system_write(void* context, const void* data, uint32_t size)
+{
+    uint32_t* total = (uint32_t*)context;
+    browser_system_append_js(data, size);
+    *total += size;
+    return OS_STATUS_OK;
+}
+
+static OsStatus browser_system_read(void* context, void* data, uint32_t size)
+{
+    (void)context;
+    return browser_system_take_js(data, size) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
+}
+
+/* The page starts programs by path only, so there is no host module to find. */
+static OsStatus browser_system_find(void* context, const char* task_name, const uint8_t** out_bytes,
+                                    uint32_t* out_size)
+{
+    (void)context;
+    (void)task_name;
+    (void)out_bytes;
+    (void)out_size;
+    return OS_STATUS_TASK_NOT_FOUND;
+}
+
+/*
+ * Save the whole system into Module.savedSystem (a list of chunks) and shut
+ * the kernel down. out: [0] bytes saved, [1] milliseconds to the next
+ * deadline (0xffffffff: none), [2] wake pins, then up to four pairs of pin
+ * and edges. The board's parts, displays and pins keep their state.
+ */
+EMSCRIPTEN_KEEPALIVE
+int browser_system_sleep(uint32_t* out)
+{
+    OsGpioWake wake[4];
+    uint32_t total = 0U;
+    uint32_t pins;
+    uint32_t index;
+    OsStatus status;
+
+    if (!g_runtime_initialized)
+    {
+        browser_set_error("browser_system_sleep", OS_STATUS_ERROR);
+        return (int)OS_STATUS_ERROR;
+    }
+    out[1] = os_get_next_wakeup_ms();
+    pins = os_gpio_wake_pins(wake, 4U);
+    browser_system_reset_js();
+    status = os_system_save(browser_system_write, &total);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_system_save", status);
+        browser_system_reset_js();
+        return (int)status;
+    }
+    out[0] = total;
+    out[2] = pins < 4U ? pins : 4U;
+    for (index = 0U; index < out[2]; ++index)
+    {
+        out[3U + index * 2U] = wake[index].pin;
+        out[4U + index * 2U] = wake[index].edges;
+    }
+    os_shutdown();
+    browser_clock_stop();
+    g_runtime_initialized = 0;
+    g_asleep = 1;
+    return (int)OS_STATUS_OK;
+}
+
+/*
+ * Wake, first half: a fresh kernel with its ports, the parts as they were.
+ * The page then registers its device profile again (the kernel's side of
+ * it only) and calls browser_system_restore.
+ */
+EMSCRIPTEN_KEEPALIVE
+int browser_system_boot(void)
+{
+    browser_clear_error();
+    return (int)browser_kernel_start(0);
+}
+
+/*
+ * Wake, second half: the system from Module.savedSystem (a Uint8Array) with
+ * the time slept, then the edge that woke the board (pin 0xffffffff: none).
+ * The page's records follow the tasks by id. On failure the kernel is left
+ * fresh and empty.
+ */
+EMSCRIPTEN_KEEPALIVE
+int browser_system_restore(uint32_t slept_ms, uint32_t wake_pin, uint32_t wake_edge)
+{
+    uint32_t ids[BROWSER_MAX_TASKS];
+    uint32_t count;
+    uint32_t index;
+    OsStatus status;
+    BrowserTaskRecord** link = &g_task_records;
+
+    browser_system_rewind_js();
+    status = os_system_restore(browser_system_read, NULL, browser_system_find, NULL, slept_ms);
+    browser_system_drop_js();
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_system_restore", status);
+        browser_free_all_records();
+        return (int)status;
+    }
+
+    /* Handles are new; ids are those the tasks had. */
+    while (*link != NULL)
+    {
+        BrowserTaskRecord* record = *link;
+        record->task = os_task_find_by_id(record->task_id);
+        if (record->task == NULL)
+        {
+            *link = record->next;
+            free(record);
+            continue;
+        }
+        record->observed_run_count = os_task_get_run_count(record->task);
+        link = &record->next;
+    }
+    /* After a reload the page has no records yet: one for every task there is. */
+    count = os_task_get_id_list(ids, BROWSER_MAX_TASKS);
+    for (index = 0U; index < count; ++index)
+    {
+        BrowserTaskRecord* record;
+        if (browser_find_record(ids[index]) != NULL)
+        {
+            continue;
+        }
+        record = (BrowserTaskRecord*)calloc(1U, sizeof(BrowserTaskRecord));
+        if (record == NULL)
+        {
+            break;
+        }
+        record->task_id = ids[index];
+        record->task = os_task_find_by_id(ids[index]);
+        record->observed_run_count = os_task_get_run_count(record->task);
+        record->next = g_task_records;
+        g_task_records = record;
+    }
+    if (wake_pin != 0xffffffffU)
+    {
+        os_gpio_edge(wake_pin, wake_edge);
+    }
+    return (int)OS_STATUS_OK;
+}
+
+/*
+ * The board's parts, which keep power through a sleep: the pins as the
+ * board sees them, the displays' pictures and brightness, the chips with
+ * their registers and pictures. The page keeps them with a saved system so
+ * a sleep survives a reload; the parts must be those of the same profile.
+ */
+#define BROWSER_BOARD_MAGIC 0x31425357U /* "WSB1" */
+
+static uint32_t browser_board_walk(uint8_t* out, const uint8_t* in, uint32_t size)
+{
+    uint32_t at = 0U;
+    uint32_t index;
+    int ok = 1;
+    uint32_t magic = BROWSER_BOARD_MAGIC;
+
+#define BROWSER_BOARD_BYTES(pointer, length)                                   \
+    do                                                                         \
+    {                                                                          \
+        if (out != NULL)                                                       \
+        {                                                                      \
+            memcpy(out + at, (pointer), (length));                             \
+        }                                                                      \
+        else if (in != NULL)                                                   \
+        {                                                                      \
+            ok = ok && at + (length) <= size;                                  \
+            if (ok)                                                            \
+            {                                                                  \
+                memcpy((pointer), in + at, (length));                          \
+            }                                                                  \
+        }                                                                      \
+        at += (length);                                                        \
+    } while (0)
+
+    BROWSER_BOARD_BYTES(&magic, sizeof(magic));
+    if (in != NULL && (!ok || magic != BROWSER_BOARD_MAGIC))
+    {
+        return 0U;
+    }
+    BROWSER_BOARD_BYTES(&g_board, sizeof(g_board));
+    for (index = 0U; index < BROWSER_DISPLAYS && ok; ++index)
+    {
+        BrowserDisplay* display = &g_displays[index];
+        uint32_t pixels = display->rgba != NULL ? display->width * display->height * 4U : 0U;
+        BROWSER_BOARD_BYTES(&display->brightness, sizeof(display->brightness));
+        if (pixels != 0U)
+        {
+            BROWSER_BOARD_BYTES(display->rgba, pixels);
+            display->dirty = 1U;
+        }
+    }
+    for (index = 0U; index < BROWSER_CHIPS && ok; ++index)
+    {
+        BrowserChip* chip = &g_chips[index];
+        if (chip->type == BROWSER_CHIP_LM75)
+        {
+            BROWSER_BOARD_BYTES(&chip->as.lm75, sizeof(chip->as.lm75));
+        }
+        else if (chip->type == BROWSER_CHIP_GC9A01)
+        {
+            /* The controller's state, then its picture; the picture's buffer stays where it is. */
+            BrowserGc9a01 copy = chip->as.gc9a01;
+            BrowserDisplay* screen = &chip->as.gc9a01.screen;
+            uint32_t pixels = screen->rgba != NULL ? screen->width * screen->height * 4U : 0U;
+            BROWSER_BOARD_BYTES(&copy, offsetof(BrowserGc9a01, screen));
+            if (in != NULL && ok)
+            {
+                memcpy(&chip->as.gc9a01, &copy, offsetof(BrowserGc9a01, screen));
+            }
+            BROWSER_BOARD_BYTES(&screen->brightness, sizeof(screen->brightness));
+            if (pixels != 0U)
+            {
+                BROWSER_BOARD_BYTES(screen->rgba, pixels);
+                screen->dirty = 1U;
+            }
+        }
+    }
+#undef BROWSER_BOARD_BYTES
+    return ok ? at : 0U;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_board_state_size(void)
+{
+    return browser_board_walk(NULL, NULL, 0U);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void browser_board_state_write(uint8_t* out)
+{
+    (void)browser_board_walk(out, NULL, 0U);
+}
+
+/* 0 when it fits the board's parts; else the parts are left as they may be and the page starts afresh. */
+EMSCRIPTEN_KEEPALIVE
+int browser_board_state_read(const uint8_t* in, uint32_t size)
+{
+    return browser_board_walk(NULL, in, size) == size ? (int)OS_STATUS_OK : (int)OS_STATUS_INVALID_ARGUMENT;
+}
+
+/* Which runtime build a saved system came from: one from another build is not woken. */
+EMSCRIPTEN_KEEPALIVE
+const char* browser_build_id(void)
+{
+    return __DATE__ " " __TIME__;
+}
+
+/*
+ * The page reloaded while the device slept: the kernel it just started
+ * goes down again, and the device sleeps on until something wakes it.
+ */
+EMSCRIPTEN_KEEPALIVE
+void browser_system_power_down(void)
+{
+    if (g_runtime_initialized)
+    {
+        os_shutdown();
+        browser_clock_stop();
+        g_runtime_initialized = 0;
+    }
+    g_asleep = 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_system_is_asleep(void)
+{
+    return (uint32_t)g_asleep;
+}
+
+/*
+ * The RAM programs' memory may use, in frames, as the device profile says;
+ * 0 for no budget. Only before the first program starts.
+ */
+EMSCRIPTEN_KEEPALIVE
+int browser_runtime_set_ram_frames(uint32_t frames)
+{
+    OsStatus status;
+
+    g_browser_page_store.ram_frames = frames;
+    status = os_page_store_set(&g_browser_page_store);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_page_store_set", status);
+    }
+    return (int)status;
+}
+
+/* Paging across all programs: frames in RAM, the budget, frames stored, writes and reads so far. */
+EMSCRIPTEN_KEEPALIVE
+int browser_runtime_get_page_stats(uint32_t* out)
+{
+    OsPageStats stats;
+    OsStatus status = os_page_get_stats(&stats);
+
+    if (status != OS_STATUS_OK)
+    {
+        return (int)status;
+    }
+    out[0] = stats.ram_frames;
+    out[1] = g_browser_page_store.ram_frames;
+    out[2] = stats.stored_frames;
+    out[3] = stats.stores;
+    out[4] = stats.loads;
     return (int)OS_STATUS_OK;
 }
 
@@ -1578,11 +1939,18 @@ int browser_display_add(const char* name, uint32_t number, uint32_t width, uint3
     info.dpi = (uint16_t)dpi;
     info.has_brightness = 1U;
     info.brightness = (uint8_t)brightness;
+    /* The panel keeps power through a sleep, and so its picture (docs/decisions.md, 1). */
+    info.keeps_image = 1U;
     status = os_display_add(name, number, &info);
     if (status != OS_STATUS_OK)
     {
         browser_set_error("os_display_add", status);
         return (int)status;
+    }
+    if (display->rgba != NULL && display->width == width && display->height == height)
+    {
+        /* Registered again after a sleep: the picture stays. */
+        return (int)OS_STATUS_OK;
     }
     free(display->rgba);
     display->rgba = (uint8_t*)calloc((size_t)width * height, 4U);
@@ -2031,6 +2399,10 @@ int browser_runtime_step(uint32_t now_ms, uint32_t max_slices)
     uint32_t slice;
     OsStatus status;
 
+    if (g_asleep)
+    {
+        return (int)OS_STATUS_OK;
+    }
     if (!g_runtime_initialized)
     {
         status = (OsStatus)browser_runtime_init();
@@ -2249,6 +2621,9 @@ int browser_task_get_memory_usage(uint32_t task_id, uint32_t* out)
     out[7] = usage.swap_bytes;
     out[8] = usage.kernel_bytes;
     out[9] = usage.total_bytes;
+    out[10] = usage.resident_memory_bytes;
+    out[11] = usage.stored_memory_bytes;
+    out[12] = usage.block_memory_bytes;
     return (int)OS_STATUS_OK;
 }
 

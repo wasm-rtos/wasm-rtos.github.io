@@ -71,9 +71,39 @@ in which functions. It also shows the fuel the program has spent (the
 interpreter's work count, the same on every device), the browser time its
 slices took, and its own output. The Console shows every program's stdout
 and stderr, each line marked with the task that wrote it; the runtime's
-output port delivers them per task. Pausing a program, or the ⇣ button, swaps it out of RAM;
-swap images are kept in JavaScript, outside the runtime's memory, and the
-program comes back when it runs again.
+output port delivers them per task.
+
+### Memory
+
+Programs' memory is paged as on a board, in 4 KB frames, through a page
+store whose slots live in JavaScript, outside the runtime's memory. Each
+device profile states how much RAM programs may use: the dev board 80 KB
+(20 frames, what an ESP32 without PSRAM can spare), the watch 2 MB.
+Programs still get the memory they ask for; beyond the budget their frames
+go to the store and come back when touched. While all of a program's
+memory fits, it stays one block and runs at full speed. The Processor
+panel shows the frames in RAM of the budget, the frames stored and how
+many went out and came back; a program's Memory row says whether its
+memory is one block or paged. Pausing a program, or the ⇣ button, swaps it
+out of RAM; it comes back when it runs again.
+
+### Sleep
+
+The ☾ button (or Z) puts the device to sleep the way a board sleeps
+deeply: the kernel saves the whole system (programs, what they wait for,
+queues, timers, files, the devices they hold) and powers down. The board's
+parts keep power, so displays keep their pictures and chips their
+registers. The device wakes by its next deadline, by an edge on a pin a
+program watches (the dev board's button), or by pressing ☾ again; a fresh
+kernel restores the system with the time slept, and the programs go on
+where they were. The Console tells how big the saved system was and how
+long saving and restoring took.
+
+A sleep survives a reload: the saved system, the parts' state and the
+program list are kept in IndexedDB, and the reloaded page is a device still
+asleep, woken the same ways. **Start fresh** in the Processor panel throws
+the saved system away. A saved system from another runtime build or device
+is thrown away when the page loads.
 
 ## Building locally
 

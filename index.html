@@ -74,6 +74,10 @@
             <svg class="icon-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h3v11H6zM11 4.5h3v11h-3z"/></svg>
             <span class="visually-hidden">Run or pause execution</span>
           </button>
+          <button id="sleepButton" class="tool-button transport-button" type="button" aria-pressed="false" title="Sleep: save the whole system and power the kernel down; press again to wake (Z)">
+            <svg class="icon-sleep" viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 12.5A6.5 6.5 0 0 1 7.5 4.5a6.5 6.5 0 1 0 8 8z"/></svg>
+            <span class="visually-hidden">Sleep or wake the device</span>
+          </button>
           <button id="loadButton" class="tool-button transport-button" type="button" title="Load .wasm program (O)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13.5V4M6 8l4-4 4 4M4 13v3h12v-3"/></svg>
             <span class="visually-hidden">Load .wasm program</span>
@@ -151,10 +155,13 @@
             <dt><label for="deviceSelect">Device</label></dt><dd><select id="deviceSelect" class="device-select" title="The simulated device; switching restarts it"></select></dd>
             <dt>Status</dt><dd id="runtimeStatus">Loading</dd>
             <dt>Host heap</dt><dd id="memoryValue">0 MB</dd>
+            <dt>Paging</dt><dd id="pagingValue" title="Frames of programs' memory (4 KB each) in RAM of the device's budget">—</dd>
+            <dt>Page store</dt><dd id="pageStoreValue" title="Frames held only by the page store; frames written to it and read back so far">—</dd>
             <dt>Waiting</dt><dd id="waitingCount">0</dd>
             <dt>Timers</dt><dd id="timerCount">0</dd>
           </dl>
           <p id="runtimeStatusDetail" class="props-note">Initializing wasm-rtos</p>
+          <button id="startFreshButton" class="button button-wide" type="button" hidden title="Throw the saved system away and power the device on afresh">Start fresh</button>
         </details>
 
         <details class="section" open>
