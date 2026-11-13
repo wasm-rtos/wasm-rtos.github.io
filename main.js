@@ -1650,15 +1650,24 @@ function deleteSelected() {
   renderExplorer();
 }
 
+// A click selects; a second click on the same entry soon after opens it. Selecting redraws the list,
+// so the second click lands on a new row and the browser's dblclick would not fire.
+const DOUBLE_CLICK_MS = 400;
+let lastFileClick = { path: '', at: 0 };
+
 filesList.addEventListener('click', (event) => {
   const row = event.target.closest('.files-item');
-  if (row) selectEntry(row.dataset.path);
-});
-
-filesList.addEventListener('dblclick', (event) => {
-  const row = event.target.closest('.files-item');
-  const entry = row && explorerEntries.find((item) => item.path === row.dataset.path);
-  if (entry) activateEntry(entry);
+  if (!row) return;
+  const path = row.dataset.path;
+  const now = performance.now();
+  const again = lastFileClick.path === path && now - lastFileClick.at < DOUBLE_CLICK_MS;
+  lastFileClick = again ? { path: '', at: 0 } : { path, at: now };
+  if (again) {
+    const entry = explorerEntries.find((item) => item.path === path);
+    if (entry) activateEntry(entry);
+  } else {
+    selectEntry(path);
+  }
 });
 
 filesList.addEventListener('keydown', (event) => {

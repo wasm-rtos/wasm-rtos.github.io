@@ -18,6 +18,7 @@
   <script src="os/wasm-rtos.js" defer></script>
   <script src="workspace.js" defer></script>
   <script src="main.js" defer></script>
+  <script src="board.js" defer></script>
 </head>
 <body>
   <div class="app" id="app">
@@ -78,6 +79,10 @@
             <svg class="icon-sleep" viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 12.5A6.5 6.5 0 0 1 7.5 4.5a6.5 6.5 0 1 0 8 8z"/></svg>
             <span class="visually-hidden">Sleep or wake the device</span>
           </button>
+          <button id="boardButton" class="tool-button transport-button" type="button" aria-pressed="false" hidden title="Connect a board on its serial cable">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3v4M13 3v4M5.5 7h9v4a4.5 4.5 0 0 1-9 0zM10 15.5V18"/></svg>
+            <span class="visually-hidden">Connect or disconnect a board</span>
+          </button>
           <button id="loadButton" class="tool-button transport-button" type="button" title="Load .wasm program (O)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13.5V4M6 8l4-4 4 4M4 13v3h12v-3"/></svg>
             <span class="visually-hidden">Load .wasm program</span>
@@ -108,6 +113,8 @@
         <div id="filesList" class="files-list" aria-live="polite"></div>
         <div class="files-actions">
           <button id="filesRun" class="button files-run" type="button" disabled>Run</button>
+          <button id="filesRunOnBoard" class="button files-run" type="button" hidden disabled title="Start it on the board, from the page's files">Run on board</button>
+          <button id="filesPutOnCard" class="button files-run" type="button" hidden disabled title="Copy it to the board's SD card, at the same path">Put on card</button>
           <button id="filesAdd" class="icon-button" type="button" title="Add files to this folder" aria-label="Add files to this folder">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 2.5h6l3 3v12h-9z M11.5 2.5v3h3 M10 9v6 M7 12h6"/></svg>
           </button>
@@ -163,6 +170,12 @@
           </dl>
           <p id="runtimeStatusDetail" class="props-note">Initializing wasm-rtos</p>
           <button id="startFreshButton" class="button button-wide" type="button" hidden title="Throw the saved system away and power the device on afresh">Start fresh</button>
+        </details>
+
+        <details id="boardSection" class="section" open hidden>
+          <summary>Board</summary>
+          <p id="boardStatus" class="props-note"></p>
+          <ul id="boardPrograms" class="board-programs"></ul>
         </details>
 
         <details class="section" open>
