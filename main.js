@@ -991,6 +991,27 @@ function renderPaging() {
     : `${stats.ram} frames, no budget`;
   pageStoreValue.textContent = `${stats.stored} frames · ${integerNumberFormat.format(stats.stores)} out, ` +
     `${integerNumberFormat.format(stats.loads)} in`;
+  // With several stores, each: its priority and what it holds.
+  const stores = CHIP.store !== 'none' ? 1 + moreStoresOf(CHIP).length : 0;
+  if (stores > 1) {
+    const kinds = [CHIP.store, ...moreStoresOf(CHIP).map((s) => s.kind)];
+    pageStoreValue.textContent += ' · ' + Array.from({ length: stores }, (_, i) => {
+      const s = readStoreStats(i);
+      return s ? `${kinds[i] === 'sd' ? 'SD' : 'mem'}${i + 1} p${s.priority}: ${s.used}` : '';
+    }).join(', ');
+  }
+}
+
+function readStoreStats(index) {
+  const out = runtime._malloc(20);
+  try {
+    if (callRuntime('browser_chip_store_stats', 'number', ['number', 'number'], [index, out]) !== OS_STATUS_OK) return null;
+    const view = new DataView(runtime.HEAPU8.buffer, out, 20);
+    const field = (i) => view.getUint32(i * 4, true);
+    return { priority: field(0), slots: field(1), used: field(2), stores: field(3), loads: field(4) };
+  } finally {
+    runtime._free(out);
+  }
 }
 
 function readPageStats() {
@@ -2127,6 +2148,10 @@ const CHIPS = {
     fuelPerMs: 2400, source: 'no chip limits: the browser\'s memory'
   }
 };
+// A chip may have more page stores than its first (kernel decision 10): each { kind: 'sd' | 'memory',
+// slots, writeMs, readMs, priority }. The first is the chip's store, at the chip's priority.
+const moreStoresOf = (chip) => chip.moreStores || [];
+
 // What a chip of one's own takes from the measured ESP32 when a value is left out.
 const SD_TIMINGS = { slots: 256, writeMs: 34.6, readMs: 13 };
 const FUEL_PER_MHZ = 10000 / 240;
@@ -2185,6 +2210,14 @@ function completeChip(fields) {
     writeMs: Number.isFinite(fields.writeMs) ? fields.writeMs : sd ? SD_TIMINGS.writeMs : 0,
     readMs: Number.isFinite(fields.readMs) ? fields.readMs : sd ? SD_TIMINGS.readMs : 0,
     fuelPerMs: Number.isFinite(fields.fuelPerMs) ? fields.fuelPerMs : Math.round(fields.mhz * FUEL_PER_MHZ),
+    priority: Number.isFinite(fields.priority) ? fields.priority : 0,
+    moreStores: (fields.moreStores || []).map((store) => ({
+      kind: store.kind,
+      slots: Number.isFinite(store.slots) ? store.slots : store.kind === 'sd' ? SD_TIMINGS.slots : 16384,
+      writeMs: Number.isFinite(store.writeMs) ? store.writeMs : store.kind === 'sd' ? SD_TIMINGS.writeMs : 0,
+      readMs: Number.isFinite(store.readMs) ? store.readMs : store.kind === 'sd' ? SD_TIMINGS.readMs : 0,
+      priority: Number.isFinite(store.priority) ? store.priority : 0
+    })),
     source: 'your own'
   };
 }
@@ -2199,7 +2232,9 @@ function chipSummary(chip) {
     memory: 'store in memory',
     none: 'no page store'
   }[chip.store];
-  return `${chip.mhz ? `${chip.mhz} MHz · ` : ''}${heap} · ${chip.frames} frames for programs · ${store} · ` +
+  const more = moreStoresOf(chip).map((s) => `${s.kind === 'sd' ? 'SD card' : 'memory'} store at priority ${s.priority}`);
+  return `${chip.mhz ? `${chip.mhz} MHz · ` : ''}${heap} · ${chip.frames} frames for programs · ${store}` +
+    `${more.length ? ` (priority ${chip.priority || 0}), ${more.join(', ')}` : ''} · ` +
     `${integerNumberFormat.format(chip.fuelPerMs)} fuel/ms. ${chip.source[0].toUpperCase()}${chip.source.slice(1)}.`;
 }
 
@@ -2209,11 +2244,18 @@ function applyChip() {
   const view = new DataView(runtime.HEAPU8.buffer, regions, Math.max(1, CHIP.regions.length) * 4);
   CHIP.regions.forEach((size, index) => view.setUint32(index * 4, size, true));
   const status = callRuntime('browser_chip_set', 'number',
-    ['number', 'number', 'number', 'number', 'number', 'number', 'number'],
+    ['number', 'number', 'number', 'number', 'number', 'number', 'number', 'number'],
     [regions, CHIP.regions.length, CHIP.frames, STORE_KINDS[CHIP.store], CHIP.slots,
-      Math.round(CHIP.writeMs * 1000), Math.round(CHIP.readMs * 1000)]);
+      Math.round(CHIP.writeMs * 1000), Math.round(CHIP.readMs * 1000), CHIP.priority || 0]);
   runtime._free(regions);
   if (status !== OS_STATUS_OK) throw new Error(`chip ${CHIP.name}: ${runtimeError()}`);
+  if (CHIP.store !== 'none') {
+    moreStoresOf(CHIP).forEach((store) => {
+      const added = callRuntime('browser_chip_add_store', 'number', ['number', 'number', 'number', 'number'],
+        [store.slots, Math.round(store.writeMs * 1000), Math.round(store.readMs * 1000), store.priority]);
+      if (added !== OS_STATUS_OK) throw new Error(`chip ${CHIP.name}: ${runtimeError()}`);
+    });
+  }
   fuelRatePerMs = CHIP.fuelPerMs;
 }
 
@@ -2306,8 +2348,43 @@ function openChipForm(mode) {
   value('#chipWriteMs', chip ? chip.writeMs : '');
   value('#chipReadMs', chip ? chip.readMs : '');
   value('#chipFuel', chip ? chip.fuelPerMs : '');
+  value('#chipPriority', chip && moreStoresOf(chip).length ? chip.priority || 0 : '');
+  document.querySelector('#chipMoreStores').replaceChildren(...(chip ? moreStoresOf(chip) : []).map(storeRow));
   document.querySelector('#chipFormError').hidden = true;
   document.querySelector('#chipDialog').showModal();
+}
+
+// A row of the form's further stores: kind, slots, write and read ms, priority.
+function storeRow(store = { kind: 'sd' }) {
+  const row = document.createElement('li');
+  const field = (type, value, title) => {
+    const input = document.createElement('input');
+    input.type = type;
+    input.value = value ?? '';
+    input.title = title;
+    input.setAttribute('aria-label', title);
+    if (type === 'number') { input.min = '0'; input.step = 'any'; }
+    return input;
+  };
+  const kind = document.createElement('select');
+  kind.className = 'device-select';
+  kind.setAttribute('aria-label', 'What it is');
+  [['sd', 'SD card'], ['memory', 'Memory']].forEach(([v, label]) => {
+    const option = document.createElement('option');
+    option.value = v;
+    option.textContent = label;
+    option.selected = store.kind === v;
+    kind.appendChild(option);
+  });
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'icon-button';
+  remove.textContent = '×';
+  remove.title = 'Remove this store';
+  remove.addEventListener('click', () => row.remove());
+  row.append(kind, field('number', store.slots, 'Slots'), field('number', store.writeMs, 'Frame write, ms'),
+    field('number', store.readMs, 'Frame read, ms'), field('number', store.priority, 'Priority'), remove);
+  return row;
 }
 
 function readChipForm() {
@@ -2326,8 +2403,16 @@ function readChipForm() {
     slots: number('#chipSlots'),
     writeMs: number('#chipWriteMs'),
     readMs: number('#chipReadMs'),
-    fuelPerMs: number('#chipFuel')
+    fuelPerMs: number('#chipFuel'),
+    priority: number('#chipPriority'),
+    moreStores: [...document.querySelectorAll('#chipMoreStores li')].map((row) => {
+      const [slots, writeMs, readMs, priority] = [...row.querySelectorAll('input')]
+        .map((input) => (input.value.trim() === '' ? NaN : Number(input.value)));
+      return { kind: row.querySelector('select').value, slots, writeMs, readMs, priority };
+    })
   };
+  if (fields.moreStores.length > 3) return 'A chip has at most four page stores';
+  if (fields.moreStores.length && fields.store === 'none') return 'More stores need a first one: pick its page store';
   if (!fields.name) return 'Give the chip a name';
   if (!(fields.mhz > 0)) return 'The clock is a number of MHz';
   if (!(fields.ramKb >= 16)) return 'The RAM is at least 16 KB';
@@ -2344,7 +2429,8 @@ function chipIdFor(name) {
   return id;
 }
 
-const CHIP_FILE_FIELDS = ['name', 'mhz', 'regions', 'frames', 'store', 'slots', 'writeMs', 'readMs', 'fuelPerMs'];
+const CHIP_FILE_FIELDS = ['name', 'mhz', 'regions', 'frames', 'store', 'slots', 'writeMs', 'readMs', 'fuelPerMs',
+  'priority', 'moreStores'];
 
 function wireChipControls() {
   const dialog = document.querySelector('#chipDialog');
@@ -2353,6 +2439,10 @@ function wireChipControls() {
   document.querySelector('#chipCopy').addEventListener('click', () => openChipForm('copy'));
   document.querySelector('#chipEdit').addEventListener('click', () => openChipForm('edit'));
   document.querySelector('#chipCancel').addEventListener('click', () => dialog.close());
+  document.querySelector('#chipAddStore').addEventListener('click', () => {
+    const list = document.querySelector('#chipMoreStores');
+    if (list.children.length < 3) list.appendChild(storeRow());
+  });
   document.querySelector('#chipForm').addEventListener('submit', (event) => {
     const chip = readChipForm();
     const error = document.querySelector('#chipFormError');
@@ -2395,6 +2485,9 @@ function wireChipControls() {
       const chip = { source: `loaded from ${file.name}` };
       CHIP_FILE_FIELDS.forEach((field) => { chip[field] = data[field]; });
       chip.mhz = Number(chip.mhz) || 0;
+      chip.priority = Number(chip.priority) || 0;
+      chip.moreStores = Array.isArray(chip.moreStores) ? chip.moreStores.filter((s) => s && (s.kind === 'sd' || s.kind === 'memory') &&
+        [s.slots, s.writeMs, s.readMs, s.priority].every(Number.isFinite)).slice(0, 3) : [];
       const id = chipIdFor(chip.name);
       ownChips[id] = chip;
       if (saveOwnChips(ownChips)) useChip(id);

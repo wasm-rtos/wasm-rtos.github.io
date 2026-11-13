@@ -175,6 +175,8 @@
         <details id="boardSection" class="section" open hidden>
           <summary>Board</summary>
           <p id="boardStatus" class="props-note"></p>
+          <p class="props-note">Page stores, by priority: the higher takes the next frame.</p>
+          <ul id="boardStores" class="board-programs board-stores"></ul>
           <ul id="boardPrograms" class="board-programs"></ul>
         </details>
 
@@ -293,6 +295,12 @@
         <label>Frame write <span class="unit-input"><input id="chipWriteMs" type="number" min="0" step="0.1" placeholder="34.6"> ms</span></label>
         <label>Frame read <span class="unit-input"><input id="chipReadMs" type="number" min="0" step="0.1" placeholder="13"> ms</span></label>
         <label>Speed <span class="unit-input"><input id="chipFuel" type="number" min="1" max="40000"> fuel/ms</span></label>
+        <label>Store priority <input id="chipPriority" type="number" min="0" max="99" placeholder="0" title="The higher takes the next frame"></label>
+        <div class="chip-more-stores">
+          <span>More page stores</span>
+          <ul id="chipMoreStores"></ul>
+          <button id="chipAddStore" class="button" type="button" title="Another place for frames, with its own priority">Add a store</button>
+        </div>
       </details>
       <p id="chipFormError" class="chip-form-error" hidden></p>
       <div class="chip-dialog-buttons">

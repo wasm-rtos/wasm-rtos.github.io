@@ -8,6 +8,7 @@ const BOARD = {
   CONSOLE: 0x01, RESULT: 0x02, TASK_ENDED: 0x03,
   FS_STAT: 0x10, FS_READ: 0x11, FS_LIST: 0x12, PAGE_WRITE: 0x13, PAGE_READ: 0x14,
   PUT_OPEN: 0x20, PUT_DATA: 0x21, PUT_CLOSE: 0x22, RUN: 0x23, KILL: 0x24, LIST: 0x25, PS: 0x26,
+  STORES: 0x27, PRIORITY: 0x28,
   HELLO: 0x7F, FS_ANSWER: 0x90
 };
 const BOARD_BAUD = 921600;
@@ -22,7 +23,9 @@ const boardLink = {
   nextId: 1,
   frames: new Map(),   // the board's memory frames by slot, while it has no card
   programs: new Map(), // task id -> { path, status }
+  stores: [],          // the board's page stores: { name, priority, slots, used, writes, reads }
   helloTimer: 0,
+  storesTimer: 0,
   writing: Promise.resolve()
 };
 
@@ -30,6 +33,7 @@ const boardButton = document.querySelector('#boardButton');
 const boardSection = document.querySelector('#boardSection');
 const boardStatus = document.querySelector('#boardStatus');
 const boardPrograms = document.querySelector('#boardPrograms');
+const boardStores = document.querySelector('#boardStores');
 const filesRunOnBoard = document.querySelector('#filesRunOnBoard');
 const filesPutOnCard = document.querySelector('#filesPutOnCard');
 
@@ -217,6 +221,7 @@ async function connectBoard() {
   boardLink.frames.clear();
   // The board takes three silent seconds as the cable gone: say HELLO every second.
   boardLink.helloTimer = setInterval(() => boardSend(BOARD.HELLO, 0, 0, encoder.encode('v1 computer=page')), 1000);
+  boardLink.storesTimer = setInterval(readBoardStores, 2000);
   boardSend(BOARD.HELLO, 0, 0, encoder.encode('v1 computer=page'));
   renderBoard();
   readBoard(port.readable).then(() => disconnectBoard());
@@ -226,6 +231,8 @@ async function disconnectBoard() {
   const { port, writer } = boardLink;
   if (!port) return;
   clearInterval(boardLink.helloTimer);
+  clearInterval(boardLink.storesTimer);
+  boardLink.stores = [];
   boardLink.port = null;
   boardLink.writer = null;
   boardLink.info = null;
@@ -297,6 +304,56 @@ async function putOnCard(path) {
   }
 }
 
+/* ---------- The board's page stores (kernel decision 10) ---------- */
+
+// One line a store: "card priority=2 slots=256 used=0 writes=448 reads=396".
+async function readBoardStores() {
+  if (!boardLink.info) return;
+  try {
+    const { status, text } = await boardCommand(BOARD.STORES, 0, new Uint8Array(0));
+    if (status) return;
+    boardLink.stores = text.split('\n').filter(Boolean).map((line) => {
+      const [name, ...fields] = line.split(' ');
+      return { name, ...Object.fromEntries(fields.map((f) => f.split('=')).map(([k, v]) => [k, Number(v)])) };
+    });
+    renderBoardStores();
+  } catch (error) {
+    // A board that does not answer in time is shown as it was.
+  }
+}
+
+// The person orders the stores: the higher priority takes the next frame.
+async function setBoardPriority(name, priority) {
+  try {
+    const { status, text } = await boardCommand(BOARD.PRIORITY, 0, encoder.encode(`${name} ${priority}`));
+    if (status) throw new Error(text);
+    appendLog(`Board: the ${name} store now at priority ${priority}`);
+  } catch (error) {
+    appendLog(`Board: cannot set the ${name} store's priority: ${error.message}`);
+  }
+  readBoardStores();
+}
+
+function renderBoardStores() {
+  const editing = document.activeElement && boardStores.contains(document.activeElement);
+  if (editing) return;
+  boardStores.replaceChildren(...boardLink.stores.map((store) => {
+    const row = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = `${store.name}: ${store.used} of ${store.slots} frames · ${store.writes} out, ${store.reads} in`;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '0';
+    input.max = '99';
+    input.value = String(store.priority);
+    input.title = `Priority of the ${store.name} store: the higher takes the next frame`;
+    input.setAttribute('aria-label', input.title);
+    input.addEventListener('change', () => setBoardPriority(store.name, Math.max(0, Math.round(Number(input.value) || 0))));
+    row.append(label, input);
+    return row;
+  }));
+}
+
 /* ---------- The board on the page ---------- */
 
 function renderBoard() {
@@ -324,6 +381,7 @@ function renderBoard() {
       return row;
     }));
   }
+  if (!connected) boardStores.replaceChildren();
   const wasm = typeof selectedPath === 'string' && isWasmPath(selectedPath);
   filesRunOnBoard.hidden = !info;
   filesRunOnBoard.disabled = !wasm;
