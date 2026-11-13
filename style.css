@@ -526,6 +526,8 @@ button:disabled { cursor: default; opacity: .45; }
 }
 .button:hover { background: var(--control-hover); }
 .button-wide { display: block; width: calc(100% - 20px); margin: 8px 10px 10px; }
+/* A hidden button stays hidden whatever its class shows it as. */
+.button[hidden] { display: none; }
 
 .task-list { display: flex; flex-direction: column; }
 .task-empty { margin: 0; padding: 10px; color: var(--gray-8); }
@@ -937,3 +939,39 @@ button:disabled { cursor: default; opacity: .45; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ---------- Chip ---------- */
+.chip-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px 10px; }
+.chip-actions .button { height: 24px; padding: 0 9px; }
+.chip-dialog {
+  width: min(380px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--well-border);
+  border-radius: 10px;
+  background: var(--gray-3);
+  color: var(--gray-9);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
+}
+.chip-dialog::backdrop { background: rgba(0, 0, 0, .45); }
+.chip-dialog form { display: flex; flex-direction: column; gap: 9px; padding: 16px; }
+.chip-dialog h2 { margin: 0 0 4px; font-size: 14px; color: var(--gray-10); }
+.chip-dialog label { display: grid; grid-template-columns: 112px 1fr; align-items: center; gap: 8px; color: var(--gray-8); }
+.chip-dialog input {
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--well-border);
+  border-radius: 5px;
+  background: var(--well-bg);
+  color: var(--gray-10);
+  font: inherit;
+}
+.chip-dialog details { display: flex; flex-direction: column; gap: 9px; }
+.chip-dialog details[open] > label { margin-top: 9px; }
+.chip-dialog summary { cursor: pointer; color: var(--gray-9); }
+.chip-dialog .props-note { padding: 6px 0 0; }
+.unit-input { display: flex; align-items: center; gap: 6px; color: var(--gray-8); }
+.unit-input input { flex: 1; }
+.chip-form-error { margin: 0; color: var(--accent-error); }
+.chip-dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.button-primary { background: var(--accent-select); border-color: var(--accent-select); color: #111; }

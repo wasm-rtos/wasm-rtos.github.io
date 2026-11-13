@@ -154,6 +154,7 @@
             <dt>Engine</dt><dd>wasm-rtos-vm interpreter</dd>
             <dt><label for="deviceSelect">Device</label></dt><dd><select id="deviceSelect" class="device-select" title="The simulated device; switching restarts it"></select></dd>
             <dt>Status</dt><dd id="runtimeStatus">Loading</dd>
+            <dt>Chip heap</dt><dd id="chipHeapValue" title="The chip's heap: free, and the largest block one allocation can get">—</dd>
             <dt>Host heap</dt><dd id="memoryValue">0 MB</dd>
             <dt>Paging</dt><dd id="pagingValue" title="Frames of programs' memory (4 KB each) in RAM of the device's budget">—</dd>
             <dt>Page store</dt><dd id="pageStoreValue" title="Frames held only by the page store; frames written to it and read back so far">—</dd>
@@ -162,6 +163,23 @@
           </dl>
           <p id="runtimeStatusDetail" class="props-note">Initializing wasm-rtos</p>
           <button id="startFreshButton" class="button button-wide" type="button" hidden title="Throw the saved system away and power the device on afresh">Start fresh</button>
+        </details>
+
+        <details class="section" open>
+          <summary>Chip</summary>
+          <dl class="props">
+            <dt><label for="chipSelect">Chip</label></dt><dd><select id="chipSelect" class="device-select" title="The chip the device has; switching restarts it"></select></dd>
+          </dl>
+          <p id="chipSummary" class="props-note"></p>
+          <div class="chip-actions">
+            <button id="chipNew" class="button" type="button" title="Make a chip of your own">New</button>
+            <button id="chipCopy" class="button" type="button" title="A chip of your own, starting from this one">Copy</button>
+            <button id="chipEdit" class="button" type="button">Edit</button>
+            <button id="chipDelete" class="button" type="button">Delete</button>
+            <button id="chipDownload" class="button" type="button" title="Save this chip as a file">Download</button>
+            <button id="chipLoad" class="button" type="button" title="Add a chip from a file">Load</button>
+            <input id="chipFile" type="file" accept=".json,application/json" hidden>
+          </div>
         </details>
 
         <details class="section" open>
@@ -240,5 +258,35 @@
       <span id="pageDropDetail">Release anywhere · a single .wasm also runs</span>
     </div>
   </div>
+  <dialog id="chipDialog" class="chip-dialog" aria-labelledby="chipDialogTitle">
+    <form id="chipForm" method="dialog">
+      <h2 id="chipDialogTitle">New chip</h2>
+      <label>Name <input id="chipName" required maxlength="40" placeholder="My ESP32-C3"></label>
+      <label>Clock <span class="unit-input"><input id="chipMhz" type="number" min="1" max="2000" required placeholder="160"> MHz</span></label>
+      <label>RAM <span class="unit-input"><input id="chipRamKb" type="number" min="16" max="65536" required placeholder="320"> KB</span></label>
+      <label>Page store
+        <select id="chipStore" class="device-select">
+          <option value="sd">SD card</option>
+          <option value="memory">In memory, no delay</option>
+          <option value="none">None (no paging)</option>
+        </select>
+      </label>
+      <details>
+        <summary>Details</summary>
+        <p class="props-note">Empty fields are worked out from the clock and the RAM, as on the measured ESP32.</p>
+        <label>RAM regions <span class="unit-input"><input id="chipRegions" placeholder="113, 97, 17, 15, 6, 3"> KB</span></label>
+        <label>RAM for programs <span class="unit-input"><input id="chipFrames" type="number" min="0" max="65536"> frames of 4 KB</span></label>
+        <label>Store slots <input id="chipSlots" type="number" min="1" max="65536" placeholder="256"></label>
+        <label>Frame write <span class="unit-input"><input id="chipWriteMs" type="number" min="0" step="0.1" placeholder="34.6"> ms</span></label>
+        <label>Frame read <span class="unit-input"><input id="chipReadMs" type="number" min="0" step="0.1" placeholder="13"> ms</span></label>
+        <label>Speed <span class="unit-input"><input id="chipFuel" type="number" min="1" max="40000"> fuel/ms</span></label>
+      </details>
+      <p id="chipFormError" class="chip-form-error" hidden></p>
+      <div class="chip-dialog-buttons">
+        <button class="button" type="button" id="chipCancel">Cancel</button>
+        <button class="button button-primary" type="submit" id="chipSave">Save and use</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>
