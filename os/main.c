@@ -11,6 +11,7 @@
 
 #include "os/wasm-rtos/os.h"
 #include "os/wasm-rtos/fs.h"
+#include "os/chip_heap.h"
 
 #include <emscripten/emscripten.h>
 
@@ -19,6 +20,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/*
+ * The kernel and the interpreter allocate from the simulated chip's heap
+ * (chip_heap.h, forced into every file by build-browser.sh); the page's own
+ * parts, which are not on the chip, use the browser's.
+ */
+#undef malloc
+#undef calloc
+#undef realloc
+#undef free
 
 #define BROWSER_MAX_SLICES_PER_FRAME 64U
 /* Keep this aligned with the core scheduler's OS_TASK_SLICE_FUEL value. */
@@ -790,11 +801,41 @@ static OsStatus browser_page_read(void* context, uint32_t slot, void* frame)
     return browser_page_read_js(slot, frame, BROWSER_FRAME_SIZE) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
 }
 
-/* The device profile sets ram_frames before the first program starts. */
+/*
+ * A store that takes its time, as an SD card does on the board port: a
+ * frame is written or read in the call, and the whole chip waits for it.
+ * The page cannot block, so the time is owed: the scheduler runs no slice
+ * until the chip's clock has paid it (browser_runtime_step).
+ */
+static uint32_t g_page_write_us;
+static uint32_t g_page_read_us;
+static double g_page_owed_until_ms;
+static double browser_elapsed_now_ms(void);
+
+static void browser_page_owe(uint32_t us)
+{
+    double now = browser_elapsed_now_ms();
+    g_page_owed_until_ms = (g_page_owed_until_ms > now ? g_page_owed_until_ms : now) + us / 1000.0;
+}
+
+static OsStatus browser_page_write_slow(void* context, uint32_t slot, const void* frame)
+{
+    browser_page_owe(g_page_write_us);
+    return browser_page_write(context, slot, frame);
+}
+
+static OsStatus browser_page_read_slow(void* context, uint32_t slot, void* frame)
+{
+    browser_page_owe(g_page_read_us);
+    return browser_page_read(context, slot, frame);
+}
+
+/* The chip sets the store before the first program starts (browser_chip_set). */
 static OsPageStore g_browser_page_store =
 {
     NULL, BROWSER_PAGE_SLOTS, 0U, browser_page_write, browser_page_read, NULL, NULL, NULL, NULL
 };
+static uint8_t g_browser_has_store = 1U;
 
 /* The page keeps a log per program; it gets the bytes as written. */
 EM_JS(void, browser_output_to_page, (uint32_t task_id, uint32_t fd, const void* data, uint32_t size), {
@@ -1253,11 +1294,18 @@ static OsStatus browser_fs_read_dir(void* context, const char* path, uint32_t in
     return OS_STATUS_END_OF_DIRECTORY;
 }
 
+/* On a chip whose files are on an SD card, a program is read into the chip's RAM, as on the board. */
+static uint8_t g_files_on_card;
+
 static const uint8_t* browser_fs_map(void* context, void* handle, uint64_t* out_size)
 {
     BrowserFile* file = (BrowserFile*)handle;
     (void)context;
 
+    if (g_files_on_card)
+    {
+        return NULL;
+    }
     *out_size = file->size;
     return file->data;
 }
@@ -1508,7 +1556,8 @@ static OsStatus browser_kernel_start(int fresh)
     if (status == OS_STATUS_OK)
     {
         browser_page_clear_js();
-        status = os_page_store_set(&g_browser_page_store);
+        g_page_owed_until_ms = 0.0;
+        status = os_page_store_set(g_browser_has_store ? &g_browser_page_store : NULL);
     }
     if (status == OS_STATUS_OK)
     {
@@ -1865,21 +1914,44 @@ uint32_t browser_system_is_asleep(void)
 }
 
 /*
- * The RAM programs' memory may use, in frames, as the device profile says;
- * 0 for no budget. Only before the first program starts.
+ * The chip (docs/decisions.md, 2), before the first program starts: its
+ * heap regions in bytes (none: the browser's heap), the frames of RAM for
+ * programs, and its page store: kind 0 none, 1 in memory, 2 with delays
+ * (write_us and read_us a frame), with slots. The kernel starts again on it.
  */
 EMSCRIPTEN_KEEPALIVE
-int browser_runtime_set_ram_frames(uint32_t frames)
+int browser_chip_set(const uint32_t* regions, uint32_t region_count, uint32_t frames, uint32_t store_kind,
+                     uint32_t slots, uint32_t write_us, uint32_t read_us)
 {
-    OsStatus status;
-
-    g_browser_page_store.ram_frames = frames;
-    status = os_page_store_set(&g_browser_page_store);
-    if (status != OS_STATUS_OK)
+    if (g_runtime_initialized)
     {
-        browser_set_error("os_page_store_set", status);
+        os_shutdown();
+        browser_clock_stop();
+        g_runtime_initialized = 0;
     }
-    return (int)status;
+    browser_free_all_records();
+    if (chip_heap_set(regions, region_count) != 0)
+    {
+        browser_set_error("browser_chip_set", OS_STATUS_OUT_OF_MEMORY);
+        return (int)OS_STATUS_OUT_OF_MEMORY;
+    }
+    g_browser_has_store = store_kind != 0U;
+    g_files_on_card = store_kind == 2U;
+    g_browser_page_store.slots = slots != 0U ? slots : BROWSER_PAGE_SLOTS;
+    g_browser_page_store.ram_frames = frames;
+    g_page_write_us = write_us;
+    g_page_read_us = read_us;
+    g_browser_page_store.write = store_kind == 2U ? browser_page_write_slow : browser_page_write;
+    g_browser_page_store.read = store_kind == 2U ? browser_page_read_slow : browser_page_read;
+    browser_clear_error();
+    return (int)browser_kernel_start(1);
+}
+
+/* The chip's heap, region by region: [free, largest free block, size] each; returns how many regions. */
+EMSCRIPTEN_KEEPALIVE
+uint32_t browser_chip_heap_stats(uint32_t* out, uint32_t max_regions)
+{
+    return chip_heap_stats(out, max_regions);
 }
 
 /* Paging across all programs: frames in RAM, the budget, frames stored, writes and reads so far. */
@@ -2432,6 +2504,11 @@ int browser_runtime_step(uint32_t now_ms, uint32_t max_slices)
 
         (void)browser_wire_poll();
         slice_started_at_ms = browser_elapsed_now_ms();
+        /* The chip is still waiting for the card: no slice runs until that time has passed. */
+        if (slice_started_at_ms < g_page_owed_until_ms)
+        {
+            break;
+        }
         status = os_schedule();
         slice_finished_at_ms = browser_elapsed_now_ms();
         browser_trace_capture_slice(slice_started_at_ms, slice_finished_at_ms);

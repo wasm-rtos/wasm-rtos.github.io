@@ -73,12 +73,31 @@ slices took, and its own output. The Console shows every program's stdout
 and stderr, each line marked with the task that wrote it; the runtime's
 output port delivers them per task.
 
+### Chip
+
+The Chip section of the Inspector says what chip the device has, and the
+page runs programs within it: the kernel and the interpreter allocate only
+from the chip's heap, cut into the regions the real chip has, so a program
+runs out of memory on the page where it would on the board. The chip also
+sets the RAM for programs' memory, the page store (an SD card makes the
+chip wait for every frame, as the board does, and programs are read from
+it into RAM) and the speed.
+
+**ESP32 (no PSRAM)** is measured on a real board: 206 KB of heap in seven
+regions, 16 frames for programs, an SD card that takes 34.6 ms to write a
+frame and 13 ms to read one, 10 000 fuel/ms. On it the page and the board
+agree: the same programs fit and the same do not, and paging takes as
+long. **Unlimited** is the browser without limits. **New** makes a chip of
+your own from a name, a clock and an amount of RAM (Details holds every
+other value); chips of your own are kept in the browser, can be copied,
+edited and deleted, and downloaded as a file for someone else to load. The
+Processor panel shows the chip's heap: free, and the largest block.
+
 ### Memory
 
 Programs' memory is paged as on a board, in 4 KB frames, through a page
-store whose slots live in JavaScript, outside the runtime's memory. Each
-device profile states how much RAM programs may use: the dev board 80 KB
-(20 frames, what an ESP32 without PSRAM can spare), the watch 2 MB.
+store whose slots live in JavaScript, outside the runtime's memory. The
+chip states how much RAM programs may use: 64 KB on the ESP32.
 Programs still get the memory they ask for; beyond the budget their frames
 go to the store and come back when touched. While all of a program's
 memory fits, it stays one block and runs at full speed. The Processor

@@ -978,6 +978,7 @@ function updateCounters() {
     const memoryMb = runtime.HEAPU8.buffer.byteLength / (1024 * 1024);
     memoryValue.textContent = `${memoryMb.toFixed(1)} MB`;
     renderPaging();
+    renderChipHeap();
   }
 }
 
@@ -2036,8 +2037,8 @@ const PROFILE_STORAGE_KEY = 'wasm-rtos.device';
 const DEVICE_PROFILES = {
   devboard: {
     name: 'Dev board',
-    // RAM for programs' memory, in 4 KB frames: what an ESP32 without PSRAM can spare.
-    ramFrames: 20,
+    // The chip it starts with (CHIPS); the person may pick another.
+    defaultChip: 'esp32',
     pins: [
       ...Array.from({ length: 8 }, (_, pin) => ({ name: `gpio${pin}`, pin, capabilities: GPIO_CAN_ALL })),
       { name: 'button-a', pin: 0, capabilities: GPIO_CAN_ALL },
@@ -2069,8 +2070,7 @@ const DEVICE_PROFILES = {
   },
   watch: {
     name: 'Watch',
-    // A watch chip with PSRAM: 2 MB.
-    ramFrames: 512,
+    defaultChip: 'unlimited',
     pins: [],
     buses: [],
     chips: [],
@@ -2101,6 +2101,299 @@ function loadProfileId() {
 
 const deviceProfileId = loadProfileId();
 const DEVICE_PROFILE = DEVICE_PROFILES[deviceProfileId];
+
+/* ---------- Chip (docs/decisions.md, 2) ---------- */
+
+// Chips measured on real boards. A chip: heap regions in bytes (the largest free block of each when the
+// kernel starts, after the firmware took its own, in the order the chip's allocator tries them), frames
+// of RAM for programs, the page store and its timings, speed.
+const CHIPS = {
+  esp32: {
+    name: 'ESP32 (no PSRAM)', mhz: 240, regions: [2036, 1012, 16372, 14324, 61428, 5300, 110580], frames: 16,
+    store: 'sd', slots: 256, writeMs: 34.6, readMs: 13, fuelPerMs: 10000,
+    source: 'measured on an ESP32-D0WDQ6 with the board port, 2026-11-13'
+  },
+  unlimited: {
+    name: 'Unlimited', mhz: 0, regions: [], frames: 512, store: 'memory', slots: 16384, writeMs: 0, readMs: 0,
+    fuelPerMs: 2400, source: 'no chip limits: the browser\'s memory'
+  }
+};
+// What a chip of one's own takes from the measured ESP32 when a value is left out.
+const SD_TIMINGS = { slots: 256, writeMs: 34.6, readMs: 13 };
+const FUEL_PER_MHZ = 10000 / 240;
+const CHIPS_STORAGE_KEY = 'wasm-rtos.chips';
+const chipStorageKey = (profile) => `wasm-rtos.chip.${profile}`;
+const STORE_KINDS = { none: 0, memory: 1, sd: 2 };
+
+function loadOwnChips() {
+  try {
+    const chips = JSON.parse(localStorage.getItem(CHIPS_STORAGE_KEY) || '{}');
+    return chips && typeof chips === 'object' ? chips : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveOwnChips(chips) {
+  try {
+    localStorage.setItem(CHIPS_STORAGE_KEY, JSON.stringify(chips));
+    return true;
+  } catch (error) {
+    appendLog('Chips of your own cannot be kept in this browser');
+    return false;
+  }
+}
+
+const ownChips = loadOwnChips();
+const allChips = () => ({ ...CHIPS, ...ownChips });
+
+function loadChipId() {
+  let id = null;
+  try {
+    id = localStorage.getItem(chipStorageKey(deviceProfileId));
+  } catch (error) {
+    id = null;
+  }
+  return id && id in allChips() ? id : DEVICE_PROFILE.defaultChip;
+}
+
+const chipId = loadChipId();
+const CHIP = allChips()[chipId];
+
+// A chip of one's own from the form's values: what is left out comes from the clock and the RAM.
+function completeChip(fields) {
+  const regions = fields.regionsKb && fields.regionsKb.length
+    ? fields.regionsKb.map((kb) => Math.round(kb * 1024))
+    : [Math.round(fields.ramKb * 1024)];
+  const sd = fields.store === 'sd';
+  return {
+    name: fields.name,
+    mhz: fields.mhz,
+    regions,
+    frames: Number.isFinite(fields.frames) ? fields.frames : Math.floor(regions.reduce((a, b) => a + b, 0) / 1024 / 16),
+    store: fields.store,
+    slots: Number.isFinite(fields.slots) ? fields.slots : sd ? SD_TIMINGS.slots : 16384,
+    writeMs: Number.isFinite(fields.writeMs) ? fields.writeMs : sd ? SD_TIMINGS.writeMs : 0,
+    readMs: Number.isFinite(fields.readMs) ? fields.readMs : sd ? SD_TIMINGS.readMs : 0,
+    fuelPerMs: Number.isFinite(fields.fuelPerMs) ? fields.fuelPerMs : Math.round(fields.mhz * FUEL_PER_MHZ),
+    source: 'your own'
+  };
+}
+
+function chipSummary(chip) {
+  const total = chip.regions.reduce((a, b) => a + b, 0);
+  const heap = chip.regions.length
+    ? `${formatSize(total)} heap in ${chip.regions.length} region${chip.regions.length > 1 ? 's' : ''}`
+    : 'heap without limit';
+  const store = {
+    sd: `SD card (${chip.writeMs} ms write, ${chip.readMs} ms read)`,
+    memory: 'store in memory',
+    none: 'no page store'
+  }[chip.store];
+  return `${chip.mhz ? `${chip.mhz} MHz · ` : ''}${heap} · ${chip.frames} frames for programs · ${store} · ` +
+    `${integerNumberFormat.format(chip.fuelPerMs)} fuel/ms. ${chip.source[0].toUpperCase()}${chip.source.slice(1)}.`;
+}
+
+// The kernel starts again on the chip: its heap, its frames, its store.
+function applyChip() {
+  const regions = runtime._malloc(Math.max(1, CHIP.regions.length) * 4);
+  const view = new DataView(runtime.HEAPU8.buffer, regions, Math.max(1, CHIP.regions.length) * 4);
+  CHIP.regions.forEach((size, index) => view.setUint32(index * 4, size, true));
+  const status = callRuntime('browser_chip_set', 'number',
+    ['number', 'number', 'number', 'number', 'number', 'number', 'number'],
+    [regions, CHIP.regions.length, CHIP.frames, STORE_KINDS[CHIP.store], CHIP.slots,
+      Math.round(CHIP.writeMs * 1000), Math.round(CHIP.readMs * 1000)]);
+  runtime._free(regions);
+  if (status !== OS_STATUS_OK) throw new Error(`chip ${CHIP.name}: ${runtimeError()}`);
+  fuelRatePerMs = CHIP.fuelPerMs;
+}
+
+function readChipHeap() {
+  const out = runtime._malloc(16 * 12);
+  try {
+    const count = callRuntime('browser_chip_heap_stats', 'number', ['number', 'number'], [out, 16]);
+    const view = new DataView(runtime.HEAPU8.buffer, out, 16 * 12);
+    return Array.from({ length: count }, (_, index) => ({
+      free: view.getUint32(index * 12, true),
+      largest: view.getUint32(index * 12 + 4, true),
+      size: view.getUint32(index * 12 + 8, true)
+    }));
+  } finally {
+    runtime._free(out);
+  }
+}
+
+function renderChipHeap() {
+  const regions = readChipHeap();
+  const value = document.querySelector('#chipHeapValue');
+  if (!regions.length) {
+    value.textContent = 'no limit';
+    value.title = 'This chip has no heap limit';
+    return;
+  }
+  const free = regions.reduce((total, region) => total + region.free, 0);
+  const size = regions.reduce((total, region) => total + region.size, 0);
+  const largest = Math.max(...regions.map((region) => region.largest));
+  value.textContent = `${formatSize(free)} free of ${formatSize(size)} · largest ${formatSize(largest)}`;
+  value.title = regions.map((region, index) => `Region ${index + 1}: ${formatSize(region.free)} free of ` +
+    `${formatSize(region.size)}, largest ${formatSize(region.largest)}`).join('\n');
+}
+
+// Picking a chip restarts the device on it, as picking a device does.
+function useChip(id) {
+  const running = tasks.some((task) => !['Completed', 'Failed', 'Stopped'].includes(task.status));
+  if (running && !window.confirm(`Switch to ${allChips()[id].name}? Running programs stop.`)) {
+    renderChipPicker();
+    return;
+  }
+  try {
+    localStorage.setItem(chipStorageKey(deviceProfileId), id);
+  } catch (error) {
+    appendLog('The chip choice cannot be saved in this browser');
+    renderChipPicker();
+    return;
+  }
+  window.location.reload();
+}
+
+function renderChipPicker() {
+  const select = document.querySelector('#chipSelect');
+  const group = (label, entries) => {
+    const optgroup = document.createElement('optgroup');
+    optgroup.label = label;
+    entries.forEach(([id, chip]) => {
+      const option = document.createElement('option');
+      option.value = id;
+      option.textContent = chip.name;
+      option.selected = id === chipId;
+      optgroup.appendChild(option);
+    });
+    return optgroup;
+  };
+  select.replaceChildren(group('Measured', Object.entries(CHIPS)),
+    ...(Object.keys(ownChips).length ? [group('Your own', Object.entries(ownChips))] : []));
+  document.querySelector('#chipSummary').textContent = chipSummary(CHIP);
+  const own = chipId in ownChips;
+  document.querySelector('#chipEdit').hidden = !own;
+  document.querySelector('#chipDelete').hidden = !own;
+}
+
+// The form: new (empty), copy (this chip's values under a new name) or edit (a chip of one's own).
+let chipFormTarget = null;
+
+function openChipForm(mode) {
+  const chip = mode === 'new' ? null : CHIP;
+  const value = (selector, v) => { document.querySelector(selector).value = v ?? ''; };
+  chipFormTarget = mode === 'edit' ? chipId : null;
+  document.querySelector('#chipDialogTitle').textContent =
+    { new: 'New chip', copy: 'New chip from a copy', edit: 'Edit chip' }[mode];
+  value('#chipName', chip ? (mode === 'copy' ? `${chip.name} (copy)` : chip.name) : '');
+  value('#chipMhz', chip && chip.mhz ? chip.mhz : '');
+  value('#chipRamKb', chip && chip.regions.length ? Math.round(chip.regions.reduce((a, b) => a + b, 0) / 1024) : '');
+  value('#chipStore', chip ? chip.store : 'sd');
+  value('#chipRegions', chip && chip.regions.length > 1 ? chip.regions.map((size) => Math.round(size / 1024)).join(', ') : '');
+  value('#chipFrames', chip ? chip.frames : '');
+  value('#chipSlots', chip ? chip.slots : '');
+  value('#chipWriteMs', chip ? chip.writeMs : '');
+  value('#chipReadMs', chip ? chip.readMs : '');
+  value('#chipFuel', chip ? chip.fuelPerMs : '');
+  document.querySelector('#chipFormError').hidden = true;
+  document.querySelector('#chipDialog').showModal();
+}
+
+function readChipForm() {
+  const number = (selector) => {
+    const text = document.querySelector(selector).value.trim();
+    return text === '' ? NaN : Number(text);
+  };
+  const regionsText = document.querySelector('#chipRegions').value.trim();
+  const fields = {
+    name: document.querySelector('#chipName').value.trim(),
+    mhz: number('#chipMhz'),
+    ramKb: number('#chipRamKb'),
+    store: document.querySelector('#chipStore').value,
+    regionsKb: regionsText ? regionsText.split(/[\s,;]+/).filter(Boolean).map(Number) : null,
+    frames: number('#chipFrames'),
+    slots: number('#chipSlots'),
+    writeMs: number('#chipWriteMs'),
+    readMs: number('#chipReadMs'),
+    fuelPerMs: number('#chipFuel')
+  };
+  if (!fields.name) return 'Give the chip a name';
+  if (!(fields.mhz > 0)) return 'The clock is a number of MHz';
+  if (!(fields.ramKb >= 16)) return 'The RAM is at least 16 KB';
+  if (fields.regionsKb && (fields.regionsKb.some((kb) => !(kb > 0)) || fields.regionsKb.length > 16)) {
+    return 'RAM regions are up to 16 sizes in KB, separated by commas';
+  }
+  return completeChip(fields);
+}
+
+function chipIdFor(name) {
+  const base = `own-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'chip'}`;
+  let id = base;
+  for (let n = 2; id in allChips(); n++) id = `${base}-${n}`;
+  return id;
+}
+
+const CHIP_FILE_FIELDS = ['name', 'mhz', 'regions', 'frames', 'store', 'slots', 'writeMs', 'readMs', 'fuelPerMs'];
+
+function wireChipControls() {
+  const dialog = document.querySelector('#chipDialog');
+  document.querySelector('#chipSelect').addEventListener('change', (event) => useChip(event.target.value));
+  document.querySelector('#chipNew').addEventListener('click', () => openChipForm('new'));
+  document.querySelector('#chipCopy').addEventListener('click', () => openChipForm('copy'));
+  document.querySelector('#chipEdit').addEventListener('click', () => openChipForm('edit'));
+  document.querySelector('#chipCancel').addEventListener('click', () => dialog.close());
+  document.querySelector('#chipForm').addEventListener('submit', (event) => {
+    const chip = readChipForm();
+    const error = document.querySelector('#chipFormError');
+    if (typeof chip === 'string') {
+      event.preventDefault();
+      error.textContent = chip;
+      error.hidden = false;
+      return;
+    }
+    const id = chipFormTarget || chipIdFor(chip.name);
+    ownChips[id] = chip;
+    if (saveOwnChips(ownChips)) useChip(id);
+  });
+  document.querySelector('#chipDelete').addEventListener('click', () => {
+    if (!(chipId in ownChips) || !window.confirm(`Delete ${CHIP.name}?`)) return;
+    delete ownChips[chipId];
+    if (saveOwnChips(ownChips)) useChip(DEVICE_PROFILE.defaultChip);
+  });
+  document.querySelector('#chipDownload').addEventListener('click', () => {
+    const data = { wasmRtosChip: 1 };
+    CHIP_FILE_FIELDS.forEach((field) => { data[field] = CHIP[field]; });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    link.download = `${CHIP.name.replace(/[^A-Za-z0-9._-]+/g, '-')}.chip.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  });
+  document.querySelector('#chipLoad').addEventListener('click', () => document.querySelector('#chipFile').click());
+  document.querySelector('#chipFile').addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const valid = data && data.wasmRtosChip === 1 && typeof data.name === 'string' && data.name.trim() &&
+        Array.isArray(data.regions) && data.regions.length <= 16 &&
+        data.regions.every((size) => Number.isInteger(size) && size > 0) && data.store in STORE_KINDS &&
+        [data.frames, data.slots, data.writeMs, data.readMs, data.fuelPerMs].every(Number.isFinite);
+      if (!valid) throw new Error('not a chip file');
+      const chip = { source: `loaded from ${file.name}` };
+      CHIP_FILE_FIELDS.forEach((field) => { chip[field] = data[field]; });
+      chip.mhz = Number(chip.mhz) || 0;
+      const id = chipIdFor(chip.name);
+      ownChips[id] = chip;
+      if (saveOwnChips(ownChips)) useChip(id);
+    } catch (error) {
+      appendLog(`${file.name}: ${error.message}`);
+    }
+  });
+}
 const partView = { leds: [], displays: [], panels: [] };
 
 /* ---------- Sleep ---------- */
@@ -2214,6 +2507,7 @@ function keepSleep(sleeping) {
   const record = {
     build: callRuntime('browser_build_id', 'string'),
     profile: deviceProfileId,
+    chip: chipId,
     at: sleeping.at,
     wakeAt: sleeping.wakeAt,
     pins: sleeping.pins,
@@ -2239,10 +2533,12 @@ async function resumeSleep() {
     return;
   }
   if (!record) return;
-  if (record.build !== callRuntime('browser_build_id', 'string') || record.profile !== deviceProfileId) {
+  if (record.build !== callRuntime('browser_build_id', 'string') || record.profile !== deviceProfileId ||
+      record.chip !== chipId) {
     await forgetSleep();
-    appendLog(`A saved system from ${record.profile !== deviceProfileId ? 'another device' : 'another runtime build'} ` +
-      'was thrown away; the device starts afresh');
+    const other = record.profile !== deviceProfileId ? 'another device' : record.chip !== chipId ? 'another chip'
+      : 'another runtime build';
+    appendLog(`A saved system from ${other} was thrown away; the device starts afresh`);
     return;
   }
   const pointer = runtime._malloc(record.board.length);
@@ -2933,9 +3229,7 @@ async function initializeRuntime() {
     });
     const status = callRuntime('browser_runtime_init', 'number', [], []);
     if (status !== OS_STATUS_OK) throw new Error(runtimeError());
-    if (callRuntime('browser_runtime_set_ram_frames', 'number', ['number'], [DEVICE_PROFILE.ramFrames]) !== OS_STATUS_OK) {
-      throw new Error(runtimeError());
-    }
+    applyChip();
     applyDeviceProfile();
     fuelPerSlice = callRuntime('browser_runtime_get_fuel_per_slice', 'number') || fuelPerSlice;
     setFuelRate(fuelRatePerMs);
@@ -2961,6 +3255,8 @@ async function initializeRuntime() {
 
 createCpuNode();
 renderDevicePicker();
+renderChipPicker();
+wireChipControls();
 createDeviceParts();
 if (!Board.hasSavedView()) Board.fit();
 Board.select(CPU_NODE_ID);
