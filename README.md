@@ -91,7 +91,11 @@ long. **Unlimited** is the browser without limits. **New** makes a chip of
 your own from a name, a clock and an amount of RAM (Details holds every
 other value); chips of your own are kept in the browser, can be copied,
 edited and deleted, and downloaded as a file for someone else to load. The
-Processor panel shows the chip's heap: free, and the largest block.
+Processor panel shows the chip's heap: free, and the largest block. A chip of your own may have
+more page stores than its first, each with a priority (Details, More page
+stores): a frame goes to the store of the highest priority with room, so
+a chip with fast memory above its SD card can be tried before it exists.
+The Processor panel then shows each store's priority and frames.
 
 ### A board on the cable
 
@@ -104,8 +108,9 @@ the selected program there; **Put on card** copies it to the board's card.
 Without a card the page also keeps the frames of the board's programs'
 memory, so a board with nothing but the cable runs programs larger than
 its RAM, a little slowly; unplugging ends the programs whose frames were
-here. The Board section in the Inspector shows the board and its
-programs, with Stop.
+here. The Board section in the Inspector shows the board, its
+page stores (the card and the computer) with their priorities to change,
+and its programs, with Stop.
 
 ### Memory
 

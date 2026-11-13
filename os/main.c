@@ -767,75 +767,111 @@ static void browser_chips_free_all(void)
 }
 
 /*
- * The page store: frames live in JavaScript, one Uint8Array per slot, so a
- * frame sent out really leaves the runtime's memory. The page has one
- * thread and a frame copy takes microseconds, so reads and writes finish in
- * the call (docs/decisions.md, 1).
+ * The chip's page stores (docs/decisions.md, 1 and 2; the kernel's decision
+ * 10): frames live in JavaScript, one Uint8Array per slot of each store, so
+ * a frame sent out really leaves the runtime's memory. A store in memory
+ * answers in the call; one that takes its time, as an SD card does on the
+ * board port, makes the whole chip wait for each frame: the page cannot
+ * block, so the time is owed, and the scheduler runs no slice until the
+ * chip's clock has paid it (browser_runtime_step).
  */
-EM_JS(void, browser_page_write_js, (uint32_t slot, const void* frame, uint32_t size), {
-    const slots = Module.pageSlots || (Module.pageSlots = new Map());
+EM_JS(void, browser_page_write_js, (uint32_t store, uint32_t slot, const void* frame, uint32_t size), {
+    const stores = Module.pageSlots || (Module.pageSlots = []);
+    const slots = stores[store] || (stores[store] = new Map());
     slots.set(slot, HEAPU8.slice(frame, frame + size));
 });
 
-EM_JS(int, browser_page_read_js, (uint32_t slot, void* frame, uint32_t size), {
-    const stored = Module.pageSlots && Module.pageSlots.get(slot);
+EM_JS(int, browser_page_read_js, (uint32_t store, uint32_t slot, void* frame, uint32_t size), {
+    const slots = Module.pageSlots && Module.pageSlots[store];
+    const stored = slots && slots.get(slot);
     if (!stored || stored.length !== size) return 1;
     HEAPU8.set(stored, frame);
     return 0;
 });
 
 EM_JS(void, browser_page_clear_js, (void), {
-    if (Module.pageSlots) Module.pageSlots.clear();
+    Module.pageSlots = [];
 });
 
-static OsStatus browser_page_write(void* context, uint32_t slot, const void* frame)
-{
-    (void)context;
-    browser_page_write_js(slot, frame, BROWSER_FRAME_SIZE);
-    return OS_STATUS_OK;
-}
+#define BROWSER_STORES 4U
 
-static OsStatus browser_page_read(void* context, uint32_t slot, void* frame)
+typedef struct BrowserStore
 {
-    (void)context;
-    return browser_page_read_js(slot, frame, BROWSER_FRAME_SIZE) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
-}
+    OsPageStore store;
+    uint32_t index;
+    uint32_t write_us;
+    uint32_t read_us;
+    uint32_t priority;
+} BrowserStore;
 
-/*
- * A store that takes its time, as an SD card does on the board port: a
- * frame is written or read in the call, and the whole chip waits for it.
- * The page cannot block, so the time is owed: the scheduler runs no slice
- * until the chip's clock has paid it (browser_runtime_step).
- */
-static uint32_t g_page_write_us;
-static uint32_t g_page_read_us;
+/* The chip's stores: the first sets the RAM budget, the others give slots. */
+static BrowserStore g_stores[BROWSER_STORES];
+static uint32_t g_store_count;
 static double g_page_owed_until_ms;
 static double browser_elapsed_now_ms(void);
 
 static void browser_page_owe(uint32_t us)
 {
     double now = browser_elapsed_now_ms();
-    g_page_owed_until_ms = (g_page_owed_until_ms > now ? g_page_owed_until_ms : now) + us / 1000.0;
+    if (us != 0U)
+    {
+        g_page_owed_until_ms = (g_page_owed_until_ms > now ? g_page_owed_until_ms : now) + us / 1000.0;
+    }
 }
 
-static OsStatus browser_page_write_slow(void* context, uint32_t slot, const void* frame)
+static OsStatus browser_page_write(void* context, uint32_t slot, const void* frame)
 {
-    browser_page_owe(g_page_write_us);
-    return browser_page_write(context, slot, frame);
+    BrowserStore* store = (BrowserStore*)context;
+    browser_page_owe(store->write_us);
+    browser_page_write_js(store->index, slot, frame, BROWSER_FRAME_SIZE);
+    return OS_STATUS_OK;
 }
 
-static OsStatus browser_page_read_slow(void* context, uint32_t slot, void* frame)
+static OsStatus browser_page_read(void* context, uint32_t slot, void* frame)
 {
-    browser_page_owe(g_page_read_us);
-    return browser_page_read(context, slot, frame);
+    BrowserStore* store = (BrowserStore*)context;
+    browser_page_owe(store->read_us);
+    return browser_page_read_js(store->index, slot, frame, BROWSER_FRAME_SIZE) == 0 ? OS_STATUS_OK : OS_STATUS_ERROR;
 }
 
-/* The chip sets the store before the first program starts (browser_chip_set). */
-static OsPageStore g_browser_page_store =
+static void browser_store_make(BrowserStore* store, uint32_t index, uint32_t slots, uint32_t frames, uint32_t write_us,
+                               uint32_t read_us, uint32_t priority)
 {
-    NULL, BROWSER_PAGE_SLOTS, 0U, browser_page_write, browser_page_read, NULL, NULL, NULL, NULL
-};
-static uint8_t g_browser_has_store = 1U;
+    memset(store, 0, sizeof(*store));
+    store->index = index;
+    store->write_us = write_us;
+    store->read_us = read_us;
+    store->priority = priority;
+    store->store.context = store;
+    store->store.slots = slots != 0U ? slots : BROWSER_PAGE_SLOTS;
+    store->store.ram_frames = frames;
+    store->store.write = browser_page_write;
+    store->store.read = browser_page_read;
+}
+
+/* The chip's stores into the kernel, at every start of the board. */
+static OsStatus browser_stores_start(void)
+{
+    OsStatus status = OS_STATUS_OK;
+    uint32_t index;
+
+    browser_page_clear_js();
+    g_page_owed_until_ms = 0.0;
+    if (g_store_count == 0U)
+    {
+        return os_page_store_set(NULL);
+    }
+    status = os_page_store_set(&g_stores[0].store);
+    if (status == OS_STATUS_OK)
+    {
+        status = os_page_store_priority(&g_stores[0].store, g_stores[0].priority);
+    }
+    for (index = 1U; index < g_store_count && status == OS_STATUS_OK; ++index)
+    {
+        status = os_page_store_add(&g_stores[index].store, g_stores[index].priority);
+    }
+    return status;
+}
 
 /* The page keeps a log per program; it gets the bytes as written. */
 EM_JS(void, browser_output_to_page, (uint32_t task_id, uint32_t fd, const void* data, uint32_t size), {
@@ -1567,9 +1603,7 @@ static OsStatus browser_kernel_start(int fresh)
     status = browser_gpio_start(fresh);
     if (status == OS_STATUS_OK)
     {
-        browser_page_clear_js();
-        g_page_owed_until_ms = 0.0;
-        status = os_page_store_set(g_browser_has_store ? &g_browser_page_store : NULL);
+        status = browser_stores_start();
     }
     if (status == OS_STATUS_OK)
     {
@@ -1933,7 +1967,7 @@ uint32_t browser_system_is_asleep(void)
  */
 EMSCRIPTEN_KEEPALIVE
 int browser_chip_set(const uint32_t* regions, uint32_t region_count, uint32_t frames, uint32_t store_kind,
-                     uint32_t slots, uint32_t write_us, uint32_t read_us)
+                     uint32_t slots, uint32_t write_us, uint32_t read_us, uint32_t priority)
 {
     if (g_runtime_initialized)
     {
@@ -1947,16 +1981,52 @@ int browser_chip_set(const uint32_t* regions, uint32_t region_count, uint32_t fr
         browser_set_error("browser_chip_set", OS_STATUS_OUT_OF_MEMORY);
         return (int)OS_STATUS_OUT_OF_MEMORY;
     }
-    g_browser_has_store = store_kind != 0U;
     g_files_on_card = store_kind == 2U;
-    g_browser_page_store.slots = slots != 0U ? slots : BROWSER_PAGE_SLOTS;
-    g_browser_page_store.ram_frames = frames;
-    g_page_write_us = write_us;
-    g_page_read_us = read_us;
-    g_browser_page_store.write = store_kind == 2U ? browser_page_write_slow : browser_page_write;
-    g_browser_page_store.read = store_kind == 2U ? browser_page_read_slow : browser_page_read;
+    g_store_count = store_kind != 0U ? 1U : 0U;
+    browser_store_make(&g_stores[0], 0U, slots, frames, store_kind == 2U ? write_us : 0U,
+                       store_kind == 2U ? read_us : 0U, priority);
     browser_clear_error();
     return (int)browser_kernel_start(1);
+}
+
+/* One more store of the chip, after browser_chip_set: slots only, with its delays and priority. */
+EMSCRIPTEN_KEEPALIVE
+int browser_chip_add_store(uint32_t slots, uint32_t write_us, uint32_t read_us, uint32_t priority)
+{
+    OsStatus status;
+    if (g_store_count == 0U || g_store_count == BROWSER_STORES)
+    {
+        browser_set_error("browser_chip_add_store", OS_STATUS_LIMIT_REACHED);
+        return (int)OS_STATUS_LIMIT_REACHED;
+    }
+    browser_store_make(&g_stores[g_store_count], g_store_count, slots, 0U, write_us, read_us, priority);
+    status = os_page_store_add(&g_stores[g_store_count].store, priority);
+    if (status != OS_STATUS_OK)
+    {
+        browser_set_error("os_page_store_add", status);
+        return (int)status;
+    }
+    ++g_store_count;
+    return (int)OS_STATUS_OK;
+}
+
+/* A store of the chip: [priority, slots, used, frames written, frames read]. */
+EMSCRIPTEN_KEEPALIVE
+int browser_chip_store_stats(uint32_t index, uint32_t* out)
+{
+    OsPageStoreStats stats;
+    OsStatus status = index < g_store_count ? os_page_get_store_stats(&g_stores[index].store, &stats)
+                                            : OS_STATUS_INVALID_ARGUMENT;
+    if (status != OS_STATUS_OK)
+    {
+        return (int)status;
+    }
+    out[0] = stats.priority;
+    out[1] = stats.slots;
+    out[2] = stats.used_slots;
+    out[3] = stats.stores;
+    out[4] = stats.loads;
+    return (int)OS_STATUS_OK;
 }
 
 /* The chip's heap, region by region: [free, largest free block, size] each; returns how many regions. */
@@ -1978,7 +2048,7 @@ int browser_runtime_get_page_stats(uint32_t* out)
         return (int)status;
     }
     out[0] = stats.ram_frames;
-    out[1] = g_browser_page_store.ram_frames;
+    out[1] = g_store_count != 0U ? g_stores[0].store.ram_frames : 0U;
     out[2] = stats.stored_frames;
     out[3] = stats.stores;
     out[4] = stats.loads;
