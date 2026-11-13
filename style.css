@@ -696,6 +696,10 @@ button:disabled { cursor: default; opacity: .45; }
 .chip-led.is-run { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
 .chip-led.is-pause { background: var(--accent-warn); }
 .chip-led.is-error { background: var(--accent-error); }
+.chip-led.is-sleep { background: var(--accent-blue, #6aa8ff); box-shadow: none; opacity: 0.6; }
+/* Asleep: the board's parts keep power, but nothing runs. */
+.board-layer.is-asleep { filter: brightness(0.55) saturate(0.6); transition: filter 0.4s; }
+#sleepButton[aria-pressed="true"] { color: var(--accent-blue, #6aa8ff); }
 .chip-drop-hint { color: var(--gray-8); font-size: 10.5px; margin-top: 4px; }
 
 /* GPIO parts */
