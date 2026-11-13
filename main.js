@@ -1521,6 +1521,7 @@ function runProgram(path) {
   tasks.push(task);
   selectedTaskId = task.localId;
   renderTasks();
+  return task;
 }
 
 function selectEntry(path) {
@@ -1817,7 +1818,7 @@ async function restoreSavedFiles() {
 }
 
 // Example programs appear under /sd/examples on every start; they are not saved with the user's files.
-const EXAMPLES = ['watchface.wasm', 'i2cscan.wasm', 'thermodial.wasm', 'sketch.wasm'];
+const EXAMPLES = ['watchface.wasm', 'i2cscan.wasm', 'thermodial.wasm', 'sketch.wasm', 'tour.wasm'];
 
 async function addExamples() {
   for (const name of EXAMPLES) {

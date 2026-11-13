@@ -51,6 +51,13 @@ bezel turns, button presses and touches to the kernel's input devices.
 
 `examples/` holds programs that appear under `/sd/examples` on every start:
 
+- `tour.wasm` runs on every board with an LED and a button: it sums its
+  own file, computes, pages 256 KB of memory, blinks the LED on time,
+  starts itself as a child and waits for the button, printing only what
+  must be the same everywhere. On the ESP32 chip and on a real ESP32 it
+  prints the same lines; with a board connected, **Run on both** starts it
+  here and on the board at once and compares them.
+
 - `watchface.wasm` runs on every profile: it asks the display for its size,
   shape and format and uses whatever inputs the device has.
 - `i2cscan.wasm` lists the devices on an I2C bus.
@@ -104,7 +111,9 @@ board running the wasm-rtos ESP32 port over its serial cable (Web Serial).
 The board's programs then print into the Console, marked `board task_1:`,
 and the board reads the page's files over the cable: at `/sd` on a board
 without an SD card, at `/pc` on one with a card. **Run on board** starts
-the selected program there; **Put on card** copies it to the board's card.
+the selected program there; **Put on card** copies it to the board's card;
+**Run on both** starts it here and on the board at once and, when both end,
+says whether they printed the same lines, or which differ.
 Without a card the page also keeps the frames of the board's programs'
 memory, so a board with nothing but the cable runs programs larger than
 its RAM, a little slowly; unplugging ends the programs whose frames were
